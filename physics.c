@@ -1,0 +1,537 @@
+
+#include <float.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+typedef struct _Vec3 {
+    float xyz[3];
+} Vec3;
+
+typedef struct _Quaternion {
+    float xyzw[4];
+} Quaternion;
+
+typedef struct _Plane {
+    Vec3 n;
+    float d;
+} Plane;
+
+struct _Sphere;
+
+typedef uint8_t BodyKind;
+
+typedef struct _Collision {
+    Vec3 p;
+    Vec3 n;
+    void* obj1;
+    void* obj2;
+
+    BodyKind kind1;
+    BodyKind kind2;
+} Collision;
+
+typedef struct _Body {
+    Vec3 pos;
+    float bounce;
+    Quaternion rot;
+
+    Vec3 vel;
+    Vec3 acc;
+    float mass;
+
+    BodyKind kind;
+} Body;
+
+typedef struct _Sphere {
+    Body body;
+    float radius;
+    bool is_alive;
+} Sphere;
+
+typedef struct _OBB {
+    Body body;
+    Vec3 extents;
+    Vec3 axes[3];
+    bool is_alive;
+} OBB;
+
+typedef struct _Triangle {
+    Vec3 v[3];
+    Vec3 n;
+    Plane p;
+    BodyKind kind;
+} Triangle;
+
+
+#define PHYSICS_MAX_SPHERES 32
+#define PHYSICS_MAX_TRIANGLES 128
+
+static Sphere spheres[PHYSICS_MAX_SPHERES];
+static int sphere_count = 0;
+
+static Triangle tris[PHYSICS_MAX_TRIANGLES];
+static int tri_count = 0;
+
+static struct _CollisionMapEntry {
+    BodyKind kind1;
+    BodyKind kind2;
+    bool (*collision_callback)(const void*, const void*, BodyKind, BodyKind);
+} collision_map[32];
+
+static int collision_map_count = 0;
+
+Vec3* vec3_init(Vec3* v) {
+    v->xyz[0] = 0.0f;
+    v->xyz[1] = 0.0f;
+    v->xyz[2] = 0.0f;
+    return v;
+}
+
+Vec3* vec3_set(Vec3* v, float x, float y, float z) {
+    v->xyz[0] = x;
+    v->xyz[1] = y;
+    v->xyz[2] = z;
+    return v;
+}
+
+Vec3* vec3_assign(Vec3* target, const Vec3* source) {
+    vec3_set(target, source->xyz[0], source->xyz[1], source->xyz[2]);
+}
+
+Vec3* vec3_add(const Vec3* v1, const Vec3* v2, Vec3* out) {
+    out->xyz[0] = v1->xyz[0] + v2->xyz[0];
+    out->xyz[1] = v1->xyz[1] + v2->xyz[1];
+    out->xyz[2] = v1->xyz[2] + v2->xyz[2];
+    return out;
+}
+
+Vec3* vec3_sub(const Vec3* v1, const Vec3* v2, Vec3* out) {
+    out->xyz[0] = v1->xyz[0] - v2->xyz[0];
+    out->xyz[1] = v1->xyz[1] - v2->xyz[1];
+    out->xyz[2] = v1->xyz[2] - v2->xyz[2];
+    return out;
+}
+
+Vec3* vec3_scale(const Vec3* v1, float t, Vec3* out) {
+    out->xyz[0] = v1->xyz[0] * t;
+    out->xyz[1] = v1->xyz[1] * t;
+    out->xyz[2] = v1->xyz[2] * t;
+    return out;
+}
+
+float vec3_length(const Vec3* v1) {
+    return sqrtf(v1->xyz[0] * v1->xyz[0] + v1->xyz[1] * v1->xyz[1] + v1->xyz[2] * v1->xyz[2]);
+}
+
+float vec3_dist(const Vec3* v1, const Vec3* v2) {
+    Vec3 tmp;
+    vec3_sub(v2, v1, &tmp);
+    return vec3_length(&tmp);
+}
+
+Vec3* vec3_cross(const Vec3 *v1, const Vec3 *v2, Vec3 *out) {
+    out->xyz[0] = v1->xyz[1] * v2->xyz[2] - v1->xyz[2] * v2->xyz[1];
+    out->xyz[1] = v1->xyz[2] * v2->xyz[0] - v1->xyz[0] * v2->xyz[2];
+    out->xyz[2] = v1->xyz[0] * v2->xyz[1] - v1->xyz[1] * v2->xyz[0];
+    return out;
+}
+
+float vec3_dot(const Vec3 *v1, const Vec3 *v2) {
+    return v1->xyz[0] * v2->xyz[0] +
+           v1->xyz[1] * v2->xyz[1] +
+           v1->xyz[2] * v2->xyz[2];
+}
+
+bool vec3_normalize(Vec3 *v) {
+    float length = vec3_length(v);
+
+    // Check for zero-length vector to avoid division by zero
+    if (length > 0.0f) {
+        v->xyz[0] /= length;
+        v->xyz[1] /= length;
+        v->xyz[2] /= length;
+        return true;
+    } else {
+        vec3_init(v);
+        return false;
+    }
+}
+
+Quaternion* quat_init(Quaternion* q) {
+    q->xyzw[0] = 0.0f;
+    q->xyzw[1] = 0.0f;
+    q->xyzw[2] = 0.0f;
+    q->xyzw[3] = 1.0f;
+    return q;
+}
+
+Vec3* tri_intersect(const Triangle* tri, const Vec3* o, const Vec3* d, Vec3* out) {
+
+    const float e = FLT_EPSILON;
+    Vec3 edge1, edge2, cross_e1, cross_e2, s;
+    vec3_sub(&tri->v[1], &tri->v[0], &edge1);
+    vec3_sub(&tri->v[2], &tri->v[0], &edge2);
+    vec3_cross(d, &edge2, &cross_e2);
+
+    float det = vec3_dot(&edge1, &cross_e2);
+
+    if(det > -e && det < e) {
+        return NULL;
+    }
+
+    float inv_det = 1.0f / det;
+    vec3_sub(o, &tri->v[0], &s);
+    float u = inv_det * vec3_dot(&s, &cross_e2);
+
+    if ((u < 0 && fabsf(u) > e) || (u > 1 && fabsf(u-1) > e)) {
+        return NULL;
+    }
+
+    vec3_cross(&s, &edge1, &cross_e1);
+    float v = inv_det * vec3_dot(d, &cross_e1);
+
+    if ((v < 0 && fabsf(v) > e) || (u + v > 1 && fabsf(u + v - 1) > e)) {
+        return NULL;
+    }
+
+    float t = inv_det * vec3_dot(&edge2, &cross_e1);
+
+    if(t <= e) {
+        return NULL;
+    }
+
+    vec3_scale(d, t, out);
+    vec3_add(out, o, out);
+    return out;
+}
+
+Sphere* sphere_set_bounce(Sphere* s, float b);
+
+Sphere* sphere_init(Sphere* s, float radius, const Vec3* pos, float mass, BodyKind kind) {
+    s->radius = radius;
+    s->is_alive = true;
+
+    vec3_init(&s->body.vel);
+    vec3_init(&s->body.acc);
+    quat_init(&s->body.rot);
+    vec3_set(&s->body.pos, pos->xyz[0], pos->xyz[1], pos->xyz[2]);
+    s->body.kind = kind;
+    s->body.mass = mass;
+    sphere_set_bounce(s, 0.5f);
+}
+
+Sphere* sphere_set_bounce(Sphere* s, float b) {
+    if(b < 0.0f || b > 1.0f) {
+        return NULL;
+    }
+
+    s->body.bounce = b;
+    return s;
+}
+
+const struct _CollisionMapEntry* collision_map_search(BodyKind kind1, BodyKind kind2) {
+    for(int i = 0; i < collision_map_count; ++i) {
+        struct _CollisionMapEntry* entry = &collision_map[i];
+        if((entry->kind1 == kind1 && entry->kind2 == kind2) || (entry->kind2 == kind1 && entry->kind1 == kind2)) {
+            return entry;
+        }
+    }
+
+    return NULL;
+}
+
+bool collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind)) {
+    if(!collision_map_search(kind1, kind2)) {
+        struct _CollisionMapEntry* entry = &collision_map[collision_map_count++];
+        entry->kind1 = kind1;
+        entry->kind2 = kind2;
+        entry->collision_callback = callback;
+        return true;
+    }
+
+    return false;
+}
+
+void fill_collision_info_sphere_sphere(const Sphere* lhs, const Sphere* rhs, Collision* c) {
+    vec3_sub(&rhs->body.pos, &lhs->body.pos, &c->n);
+    float l = vec3_length(&c->n);
+
+    if(l > 0) {
+        c->n.xyz[0] /= l;
+        c->n.xyz[1] /= l;
+        c->n.xyz[2] /= l;
+    }
+
+    float total_radius = lhs->radius + rhs->radius;
+    float wr1 = lhs->radius / total_radius;
+    float wr2 = rhs->radius / total_radius;
+
+    for(int i = 0; i < 3; ++i) {
+        c->p.xyz[i] = lhs->body.pos.xyz[i] * wr1 + rhs->body.pos.xyz[i] * wr2;
+    }
+}
+
+void fill_collision_info_sphere_triangle(const Sphere* lhs, const Triangle* tri, const Vec3* p, Collision* c) {
+    vec3_scale(&tri->n, 1.0f, &c->n); // Copy
+    vec3_scale(p, 1.0f, &c->p); // Copy
+}
+
+Sphere* physics_create_sphere(float radius, const Vec3* pos, float mass, BodyKind kind) {
+    Sphere* ret = &spheres[sphere_count++];
+    sphere_init(ret, radius, pos, mass, kind);
+    return ret;
+}
+
+Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3, BodyKind kind) {
+    Triangle* tri = &tris[tri_count++];
+    vec3_assign(&tri->v[0], v1);
+    vec3_assign(&tri->v[1], v2);
+    vec3_assign(&tri->v[2], v3);
+
+    Vec3 e1, e2;
+    vec3_sub(v2, v1, &e1);
+    vec3_sub(v3, v1, &e2);
+
+    vec3_cross(&e1, &e2, &tri->n);
+    vec3_normalize(&tri->n);
+
+    return tri;
+}
+
+void physics_destroy_sphere(Sphere* s) {
+    s->is_alive = false;
+}
+
+void physics_step(float t) {
+    Vec3 scaled_vel;
+
+    // Apply acceleration to velocity
+    for(int i = 0; i < sphere_count; ++i) {
+        Sphere* sp = &spheres[i];
+        if(!sp->is_alive) {
+            continue;
+        }
+
+        vec3_scale(&sp->body.acc, t, &scaled_vel);
+        vec3_add(&sp->body.vel, &scaled_vel, &sp->body.vel);
+    }
+
+    // Move all spheres by their velocity
+    for(int i = 0; i < sphere_count; ++i) {
+        Sphere* sp = &spheres[i];
+        if(!sp->is_alive) {
+            continue;
+        }
+
+        vec3_scale(&sp->body.vel, t, &scaled_vel);
+        vec3_add(&sp->body.pos, &scaled_vel, &sp->body.pos);
+    }
+
+
+    for(int i = 0; i < sphere_count; ++i) {
+        // Check collision between spheres
+        Sphere* lhs = &spheres[i];
+
+        if(!lhs->is_alive) {
+            continue;
+        }
+
+        for(int j = i + 1; j < sphere_count; ++j) {
+            Sphere* rhs = &spheres[j];
+
+            if(!rhs->is_alive) {
+                continue;
+            }
+
+            float dist = vec3_dist(&lhs->body.pos, &rhs->body.pos);
+            if(dist <= (lhs->radius + rhs->radius)) {
+                Collision c;
+                fill_collision_info_sphere_sphere(lhs, rhs, &c);
+
+                bool respond = true;
+                const struct _CollisionMapEntry* cb = collision_map_search(lhs->body.kind, rhs->body.kind);
+                if(cb) {
+                    respond = cb->collision_callback(lhs, rhs, lhs->body.kind, rhs->body.kind);
+                }
+
+                if(respond) {
+                    float overlap = dist - (lhs->radius + rhs->radius);
+
+                    Vec3 add, vel_diff;
+                    vec3_add(&lhs->body.pos, vec3_scale(&c.n, overlap * (rhs->body.mass / (lhs->body.mass + rhs->body.mass)), &add), &lhs->body.pos);
+                    vec3_sub(&rhs->body.pos, vec3_scale(&c.n, overlap * (lhs->body.mass / (lhs->body.mass + rhs->body.mass)), &add), &rhs->body.pos);
+
+                    vec3_sub(&rhs->body.vel, &lhs->body.vel, &vel_diff);
+
+                    float rel_vel = vec3_dot(&vel_diff, &c.n);
+
+                    if(rel_vel < 0) {
+                        // Calculate new velocities based on bounce values
+                        float bounce_factor = (lhs->body.bounce + rhs->body.bounce) / 2;
+
+                        float impulse = (1 + bounce_factor) * rel_vel / (1 / lhs->body.mass + 1 / rhs->body.mass);
+
+                        vec3_add(&lhs->body.vel, vec3_scale(&c.n, impulse / lhs->body.mass, &add), &lhs->body.vel);
+                        vec3_add(&rhs->body.vel, vec3_scale(&c.n, impulse / rhs->body.mass, &add), &rhs->body.vel);
+                    }
+                }
+            }
+        }
+
+        for(int j = 0; j < tri_count; ++j) {
+            const Triangle* tri = tris + j;
+
+            Vec3 p, d;
+            vec3_scale(&tri->n, -1.0f, &d);
+            if(tri_intersect(tri, &lhs->body.pos, &d, &p)) {
+                float dist = vec3_dist(&lhs->body.pos, &p);
+
+                if(dist <= lhs->radius) {
+                    Collision c;
+                    fill_collision_info_sphere_triangle(lhs, tri, &p, &c);
+
+                    bool respond = true;
+                    const struct _CollisionMapEntry* cb = collision_map_search(lhs->body.kind, tri->kind);
+
+                    if(cb) {
+                        respond = cb->collision_callback(lhs, tri, lhs->body.kind, tri->kind);
+                    }
+
+                    if(respond) {
+                        Vec3 add;
+                        float overlap = lhs->radius - dist;
+
+                        vec3_add(&lhs->body.pos, vec3_scale(&c.n, overlap, &add), &lhs->body.pos);
+                        vec3_sub(&lhs->body.vel, vec3_scale(&c.n, 2 * lhs->body.bounce * vec3_dot(&lhs->body.vel, &c.n), &add), &lhs->body.vel);
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+// #ifdef TEST_BUILD
+
+#define CHECK(expr, msg) \
+    if(!(expr)) {        \
+        fprintf(stderr, "CHECK FAILED (%d): %s", __LINE__, msg); \
+        exit(1); \
+    } \
+
+
+int main(int argc, char* argv[]) {
+    Vec3 test;
+
+    // Vector tests
+
+    vec3_init(&test);
+    CHECK(test.xyz[0] == 0.0f, "Unexpected value\n");
+    CHECK(test.xyz[1] == 0.0f, "Unexpected value\n");
+    CHECK(test.xyz[2] == 0.0f, "Unexpected value\n");
+
+    vec3_set(&test, 1, 1, 1);
+    CHECK(test.xyz[0] == 1.0f, "Unexpected value\n");
+    CHECK(test.xyz[1] == 1.0f, "Unexpected value\n");
+    CHECK(test.xyz[2] == 1.0f, "Unexpected value\n");
+
+    Vec3 ret;
+    vec3_add(&test, &test, &ret);
+    CHECK(ret.xyz[0] == 2.0f, "Unexpected value\n");
+    CHECK(ret.xyz[1] == 2.0f, "Unexpected value\n");
+    CHECK(ret.xyz[2] == 2.0f, "Unexpected value\n");
+
+    vec3_sub(&ret, &test, &ret);
+    CHECK(ret.xyz[0] == 1.0f, "Unexpected value\n");
+    CHECK(ret.xyz[1] == 1.0f, "Unexpected value\n");
+    CHECK(ret.xyz[2] == 1.0f, "Unexpected value\n");
+
+    vec3_scale(&ret, 2.0f, &ret);
+    CHECK(ret.xyz[0] == 2.0f, "Unexpected value\n");
+    CHECK(ret.xyz[1] == 2.0f, "Unexpected value\n");
+    CHECK(ret.xyz[2] == 2.0f, "Unexpected value\n");
+
+    CHECK(vec3_normalize(&ret), "Couldn't normalize\n");
+    CHECK(vec3_length(&ret), 1.0f);
+
+    Vec3 v1, v2;
+    vec3_set(&v1, 1.0f, 0.0f, 0.0f);
+    vec3_set(&v2, 0.0f, 0.0f, 1.0f);
+
+    vec3_cross(&v1, &v2, &ret);
+
+    CHECK(ret.xyz[0] == 0.0f, "Unexpected value\n");
+    CHECK(ret.xyz[1] == -1.0f, "Unexpected value\n");
+    CHECK(ret.xyz[2] == 0.0f, "Unexpected value\n");
+
+    float d = vec3_dot(&v1, &v2);
+    CHECK(d == 0.0f, "Unexpected value\n");
+
+    // Quaternion tests
+
+    Quaternion q;
+    quat_init(&q);
+
+    CHECK(q.xyzw[0] == 0.0f, "Unexpected value\n");
+    CHECK(q.xyzw[1] == 0.0f, "Unexpected value\n");
+    CHECK(q.xyzw[2] == 0.0f, "Unexpected value\n");
+    CHECK(q.xyzw[3] == 1.0f, "Unexpected value\n");
+
+    // Tri intersection
+
+    Triangle tri;
+    Vec3 origin, dir;
+    vec3_set(&origin, 0, 1, 0);
+    vec3_set(&dir, 0, -1, 0);
+
+    vec3_set(&tri.v[0], -1, 0, -1);
+    vec3_set(&tri.v[1], 0, 0, 1);
+    vec3_set(&tri.v[2], 1, 0, -1);
+
+    CHECK(tri_intersect(&tri, &origin, &dir, &ret), "Didn't intersect");
+
+    CHECK(ret.xyz[0] == 0.0f, "Unexpected value\n");
+    CHECK(ret.xyz[1] == 0.0f, "Unexpected value\n");
+    CHECK(ret.xyz[2] == 0.0f, "Unexpected value\n");
+
+    vec3_set(&dir, 0, 1, 0);
+
+    CHECK(tri_intersect(&tri, &origin, &dir, &ret) == NULL, "Unexpectedly intersected");
+
+    Vec3 p1, p2;
+    vec3_set(&p1, -0.5f, 0.0f, 0.0f);
+    vec3_set(&p2, 0.5f, 0.0f, 0.0f);
+
+    Sphere* lhs = physics_create_sphere(1.0f, &p1, 1, 0);
+    Sphere* rhs = physics_create_sphere(1.0f, &p2, 1, 0);
+
+    physics_step(1.0f / 60.0f);
+
+    CHECK(lhs->body.pos.xyz[0] == -1.0f, "Unexpected position\n");
+    CHECK(rhs->body.pos.xyz[0] == 1.0f, "Unexpected position\n");
+
+    physics_destroy_sphere(rhs);
+    CHECK(rhs->is_alive == false, "Sphere unexpectedly alive\n");
+
+    Vec3 v3;
+
+    vec3_set(&v1, -10, 0, -10);
+    vec3_set(&v2, 0, 0, 10);
+    vec3_set(&v3, 10, 0, -10);
+
+    vec3_set(&lhs->body.pos, 0.0f, 0.5f, 0.0f);
+
+    physics_create_triangle(&v1, &v2, &v3, 0);
+
+    physics_step(1.0f / 60.0f);
+
+    CHECK(lhs->body.pos.xyz[1] == 1.0f, "Body position didn't move");
+
+    return 0;
+}
+
+// #endif
