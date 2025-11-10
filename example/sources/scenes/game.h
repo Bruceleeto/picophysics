@@ -2,7 +2,7 @@
 
 #include <simulant/simulant.h>
 
-#include "physics2.h"
+#include "physics.h"
 
 class GameScene : public smlt::Scene {
 public:
