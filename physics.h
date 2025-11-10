@@ -1,11 +1,16 @@
+#pragma once
 
 #include <float.h>
 #include <math.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdio.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct _Vec3 {
     float xyz[3];
@@ -66,6 +71,19 @@ typedef struct _Triangle {
     BodyKind kind;
 } Triangle;
 
+extern void physics_step(float t);
+
+extern Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3, BodyKind kind);
+extern Sphere* physics_create_sphere(float radius, const Vec3* pos, float mass, BodyKind kind);
+extern void physics_destroy_sphere(Sphere* s);
+
+extern bool collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind));
+
+#ifdef __cplusplus
+}
+#endif
+
+#ifdef PHYSICS_IMPLMENTATION
 
 #define PHYSICS_MAX_SPHERES 32
 #define PHYSICS_MAX_TRIANGLES 128
@@ -256,7 +274,7 @@ bool collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const vo
     return false;
 }
 
-void fill_collision_info_sphere_sphere(const Sphere* lhs, const Sphere* rhs, Collision* c) {
+static void fill_collision_info_sphere_sphere(const Sphere* lhs, const Sphere* rhs, Collision* c) {
     vec3_sub(&rhs->body.pos, &lhs->body.pos, &c->n);
     float l = vec3_length(&c->n);
 
@@ -275,7 +293,7 @@ void fill_collision_info_sphere_sphere(const Sphere* lhs, const Sphere* rhs, Col
     }
 }
 
-void fill_collision_info_sphere_triangle(const Sphere* lhs, const Triangle* tri, const Vec3* p, Collision* c) {
+static void fill_collision_info_sphere_triangle(const Sphere* lhs, const Triangle* tri, const Vec3* p, Collision* c) {
     vec3_scale(&tri->n, 1.0f, &c->n); // Copy
     vec3_scale(p, 1.0f, &c->p); // Copy
 }
@@ -415,7 +433,7 @@ void physics_step(float t) {
 }
 
 
-// #ifdef TEST_BUILD
+#ifdef TEST_BUILD
 
 #define CHECK(expr, msg) \
     if(!(expr)) {        \
@@ -456,7 +474,7 @@ int main(int argc, char* argv[]) {
     CHECK(ret.xyz[2] == 2.0f, "Unexpected value\n");
 
     CHECK(vec3_normalize(&ret), "Couldn't normalize\n");
-    CHECK(vec3_length(&ret), 1.0f);
+    CHECK(vec3_length(&ret) == 1.0f, "Unexpected value\n");
 
     Vec3 v1, v2;
     vec3_set(&v1, 1.0f, 0.0f, 0.0f);
@@ -534,4 +552,6 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
-// #endif
+#endif
+
+#endif
