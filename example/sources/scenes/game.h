@@ -2,7 +2,12 @@
 
 #include <simulant/simulant.h>
 
-#include "physics.h"
+#include "../physics.h"
+
+
+typedef struct _Car {
+    Sphere* body;
+} Car;
 
 class GameScene : public smlt::Scene {
 public:
@@ -15,4 +20,8 @@ public:
     void on_activate();
     void on_deactivate();
     void on_unload();
+
+    Car cars_[4];
+
+    smlt::ActorPtr actor_;
 };

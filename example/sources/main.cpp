@@ -13,8 +13,7 @@ public:
 
     bool init() {
         // Register screens here
-        scenes->register_scene<smlt::scenes::Splash>("main", "app");
-        scenes->register_scene<GameScene>("app");
+        scenes->register_scene<GameScene>("main");
 
         return true;
     }

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef PICOPHYSICS_H
+#define PICOPHYSICS_H
 
 #include <float.h>
 #include <math.h>
@@ -71,6 +72,9 @@ typedef struct _Triangle {
     BodyKind kind;
 } Triangle;
 
+extern Vec3* vec3_init(Vec3* v);
+extern Vec3* vec3_set(Vec3* v, float x, float y, float z);
+
 extern void physics_step(float t);
 
 extern Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3, BodyKind kind);
@@ -83,7 +87,9 @@ extern bool collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(c
 }
 #endif
 
-#ifdef PHYSICS_IMPLMENTATION
+#endif
+
+#ifdef PHYSICS_IMPLEMENTATION
 
 #define PHYSICS_MAX_SPHERES 32
 #define PHYSICS_MAX_TRIANGLES 128
@@ -118,6 +124,7 @@ Vec3* vec3_set(Vec3* v, float x, float y, float z) {
 
 Vec3* vec3_assign(Vec3* target, const Vec3* source) {
     vec3_set(target, source->xyz[0], source->xyz[1], source->xyz[2]);
+    return target;
 }
 
 Vec3* vec3_add(const Vec3* v1, const Vec3* v2, Vec3* out) {
@@ -240,6 +247,7 @@ Sphere* sphere_init(Sphere* s, float radius, const Vec3* pos, float mass, BodyKi
     s->body.kind = kind;
     s->body.mass = mass;
     sphere_set_bounce(s, 0.5f);
+    return s;
 }
 
 Sphere* sphere_set_bounce(Sphere* s, float b) {
