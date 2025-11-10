@@ -24,4 +24,5 @@ public:
     Car cars_[4];
 
     smlt::ActorPtr actor_;
+    smlt::Camera3D *camera_;
 };
