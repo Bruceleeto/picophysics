@@ -47,6 +47,12 @@ typedef struct _Body {
 
     Vec3 vel;
     Vec3 acc;
+    float damping;
+
+    Vec3 a_vel;
+    Vec3 a_acc;
+    float a_damping;
+
     float mass;
 
     BodyKind kind;
@@ -78,10 +84,16 @@ extern Vec3* vec3_set(Vec3* v, float x, float y, float z);
 extern void physics_step(float t);
 
 extern Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3, BodyKind kind);
+extern size_t physics_triangle_count();
+extern const Triangle* physics_triangle_at(size_t i);
+
 extern Sphere* physics_create_sphere(float radius, const Vec3* pos, float mass, BodyKind kind);
 extern void physics_destroy_sphere(Sphere* s);
+extern void physics_set_gravity(const Vec3* v);
 
 extern bool collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind));
+
+extern Sphere* sphere_set_bounce(Sphere* s, float b);
 
 #ifdef __cplusplus
 }
@@ -107,6 +119,8 @@ static struct _CollisionMapEntry {
 } collision_map[32];
 
 static int collision_map_count = 0;
+
+static Vec3 gravity = {.xyz = {0.0f, 0.0f, 0.0f}};
 
 Vec3* vec3_init(Vec3* v) {
     v->xyz[0] = 0.0f;
@@ -246,6 +260,7 @@ Sphere* sphere_init(Sphere* s, float radius, const Vec3* pos, float mass, BodyKi
     vec3_set(&s->body.pos, pos->xyz[0], pos->xyz[1], pos->xyz[2]);
     s->body.kind = kind;
     s->body.mass = mass;
+    s->body.damping = 0.0f;
     sphere_set_bounce(s, 0.5f);
     return s;
 }
@@ -328,8 +343,20 @@ Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3
     return tri;
 }
 
+size_t physics_triangle_count() {
+    return tri_count;
+}
+
+const Triangle* physics_triangle_at(size_t i) {
+    return tris + i;
+}
+
 void physics_destroy_sphere(Sphere* s) {
     s->is_alive = false;
+}
+
+void physics_set_gravity(const Vec3* v) {
+    vec3_assign(&gravity, v);
 }
 
 void physics_step(float t) {
@@ -342,8 +369,15 @@ void physics_step(float t) {
             continue;
         }
 
+        // Apply gravity to acceleration before applying acceleration
+        // to velocity
+        vec3_add(&sp->body.acc, &gravity, &sp->body.acc);
+
         vec3_scale(&sp->body.acc, t, &scaled_vel);
         vec3_add(&sp->body.vel, &scaled_vel, &sp->body.vel);
+
+        // Apply linear damping
+        vec3_scale(&sp->body.vel, 1.0f - sp->body.damping, &sp->body.vel);
     }
 
     // Move all spheres by their velocity
@@ -439,127 +473,5 @@ void physics_step(float t) {
         }
     }
 }
-
-
-#ifdef TEST_BUILD
-
-#define CHECK(expr, msg) \
-    if(!(expr)) {        \
-        fprintf(stderr, "CHECK FAILED (%d): %s", __LINE__, msg); \
-        exit(1); \
-    } \
-
-
-int main(int argc, char* argv[]) {
-    Vec3 test;
-
-    // Vector tests
-
-    vec3_init(&test);
-    CHECK(test.xyz[0] == 0.0f, "Unexpected value\n");
-    CHECK(test.xyz[1] == 0.0f, "Unexpected value\n");
-    CHECK(test.xyz[2] == 0.0f, "Unexpected value\n");
-
-    vec3_set(&test, 1, 1, 1);
-    CHECK(test.xyz[0] == 1.0f, "Unexpected value\n");
-    CHECK(test.xyz[1] == 1.0f, "Unexpected value\n");
-    CHECK(test.xyz[2] == 1.0f, "Unexpected value\n");
-
-    Vec3 ret;
-    vec3_add(&test, &test, &ret);
-    CHECK(ret.xyz[0] == 2.0f, "Unexpected value\n");
-    CHECK(ret.xyz[1] == 2.0f, "Unexpected value\n");
-    CHECK(ret.xyz[2] == 2.0f, "Unexpected value\n");
-
-    vec3_sub(&ret, &test, &ret);
-    CHECK(ret.xyz[0] == 1.0f, "Unexpected value\n");
-    CHECK(ret.xyz[1] == 1.0f, "Unexpected value\n");
-    CHECK(ret.xyz[2] == 1.0f, "Unexpected value\n");
-
-    vec3_scale(&ret, 2.0f, &ret);
-    CHECK(ret.xyz[0] == 2.0f, "Unexpected value\n");
-    CHECK(ret.xyz[1] == 2.0f, "Unexpected value\n");
-    CHECK(ret.xyz[2] == 2.0f, "Unexpected value\n");
-
-    CHECK(vec3_normalize(&ret), "Couldn't normalize\n");
-    CHECK(vec3_length(&ret) == 1.0f, "Unexpected value\n");
-
-    Vec3 v1, v2;
-    vec3_set(&v1, 1.0f, 0.0f, 0.0f);
-    vec3_set(&v2, 0.0f, 0.0f, 1.0f);
-
-    vec3_cross(&v1, &v2, &ret);
-
-    CHECK(ret.xyz[0] == 0.0f, "Unexpected value\n");
-    CHECK(ret.xyz[1] == -1.0f, "Unexpected value\n");
-    CHECK(ret.xyz[2] == 0.0f, "Unexpected value\n");
-
-    float d = vec3_dot(&v1, &v2);
-    CHECK(d == 0.0f, "Unexpected value\n");
-
-    // Quaternion tests
-
-    Quaternion q;
-    quat_init(&q);
-
-    CHECK(q.xyzw[0] == 0.0f, "Unexpected value\n");
-    CHECK(q.xyzw[1] == 0.0f, "Unexpected value\n");
-    CHECK(q.xyzw[2] == 0.0f, "Unexpected value\n");
-    CHECK(q.xyzw[3] == 1.0f, "Unexpected value\n");
-
-    // Tri intersection
-
-    Triangle tri;
-    Vec3 origin, dir;
-    vec3_set(&origin, 0, 1, 0);
-    vec3_set(&dir, 0, -1, 0);
-
-    vec3_set(&tri.v[0], -1, 0, -1);
-    vec3_set(&tri.v[1], 0, 0, 1);
-    vec3_set(&tri.v[2], 1, 0, -1);
-
-    CHECK(tri_intersect(&tri, &origin, &dir, &ret), "Didn't intersect");
-
-    CHECK(ret.xyz[0] == 0.0f, "Unexpected value\n");
-    CHECK(ret.xyz[1] == 0.0f, "Unexpected value\n");
-    CHECK(ret.xyz[2] == 0.0f, "Unexpected value\n");
-
-    vec3_set(&dir, 0, 1, 0);
-
-    CHECK(tri_intersect(&tri, &origin, &dir, &ret) == NULL, "Unexpectedly intersected");
-
-    Vec3 p1, p2;
-    vec3_set(&p1, -0.5f, 0.0f, 0.0f);
-    vec3_set(&p2, 0.5f, 0.0f, 0.0f);
-
-    Sphere* lhs = physics_create_sphere(1.0f, &p1, 1, 0);
-    Sphere* rhs = physics_create_sphere(1.0f, &p2, 1, 0);
-
-    physics_step(1.0f / 60.0f);
-
-    CHECK(lhs->body.pos.xyz[0] == -1.0f, "Unexpected position\n");
-    CHECK(rhs->body.pos.xyz[0] == 1.0f, "Unexpected position\n");
-
-    physics_destroy_sphere(rhs);
-    CHECK(rhs->is_alive == false, "Sphere unexpectedly alive\n");
-
-    Vec3 v3;
-
-    vec3_set(&v1, -10, 0, -10);
-    vec3_set(&v2, 0, 0, 10);
-    vec3_set(&v3, 10, 0, -10);
-
-    vec3_set(&lhs->body.pos, 0.0f, 0.5f, 0.0f);
-
-    physics_create_triangle(&v1, &v2, &v3, 0);
-
-    physics_step(1.0f / 60.0f);
-
-    CHECK(lhs->body.pos.xyz[1] == 1.0f, "Body position didn't move");
-
-    return 0;
-}
-
-#endif
 
 #endif

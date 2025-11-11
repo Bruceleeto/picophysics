@@ -50,6 +50,9 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
     config.log_level = smlt::LOG_LEVEL_DEBUG;
 #endif
 
+    config.fullscreen = false;
+    // config.development.force_renderer = "gl1x";
+
     Example app(config);
     return app.run();
 }

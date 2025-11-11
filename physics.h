@@ -84,11 +84,16 @@ extern Vec3* vec3_set(Vec3* v, float x, float y, float z);
 extern void physics_step(float t);
 
 extern Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3, BodyKind kind);
+extern size_t physics_triangle_count();
+extern const Triangle* physics_triangle_at(size_t i);
+
 extern Sphere* physics_create_sphere(float radius, const Vec3* pos, float mass, BodyKind kind);
 extern void physics_destroy_sphere(Sphere* s);
 extern void physics_set_gravity(const Vec3* v);
 
 extern bool collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind));
+
+extern Sphere* sphere_set_bounce(Sphere* s, float b);
 
 #ifdef __cplusplus
 }
@@ -336,6 +341,14 @@ Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3
     vec3_normalize(&tri->n);
 
     return tri;
+}
+
+size_t physics_triangle_count() {
+    return tri_count;
+}
+
+const Triangle* physics_triangle_at(size_t i) {
+    return tris + i;
 }
 
 void physics_destroy_sphere(Sphere* s) {
