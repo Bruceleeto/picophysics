@@ -17,6 +17,7 @@ public:
 
     void on_load();
     void on_update(float dt);
+    void on_fixed_update(float step);
     void on_activate();
     void on_deactivate();
     void on_unload();

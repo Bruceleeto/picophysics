@@ -378,6 +378,9 @@ void physics_step(float t) {
 
         // Apply linear damping
         vec3_scale(&sp->body.vel, 1.0f - sp->body.damping, &sp->body.vel);
+
+        // Reset the acceleration
+        vec3_init(&sp->body.acc);
     }
 
     // Move all spheres by their velocity
@@ -462,11 +465,23 @@ void physics_step(float t) {
                     }
 
                     if(respond) {
-                        Vec3 add;
                         float overlap = lhs->radius - dist;
 
-                        vec3_add(&lhs->body.pos, vec3_scale(&c.n, overlap, &add), &lhs->body.pos);
-                        vec3_sub(&lhs->body.vel, vec3_scale(&c.n, 2 * lhs->body.bounce * vec3_dot(&lhs->body.vel, &c.n), &add), &lhs->body.vel);
+                        // Move the sphere out of overlap immediately
+                        Vec3 adjustment;
+                        vec3_scale(&c.n, overlap, &adjustment);
+                        vec3_add(&lhs->body.pos, &adjustment, &lhs->body.pos);
+
+                        // Reflect the velocity based on the collision normal
+                        float vel_along_normal = vec3_dot(&lhs->body.vel, &c.n);
+                        if (vel_along_normal < 0) {
+                            // Apply restitution
+                            Vec3 reflection;
+                            vec3_scale(&c.n,
+                                       2 * lhs->body.bounce * vel_along_normal,
+                                       &reflection);
+                            vec3_sub(&lhs->body.vel, &reflection, &lhs->body.vel);
+                        }
                     }
                 }
             }
