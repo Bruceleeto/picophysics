@@ -55,7 +55,7 @@ void GameScene::on_load() {
     vec3_set(&pos, 0, 2, 0);
 
     ball_.body = physics_create_sphere(0.5f, &pos, 1.0, 0);
-    // sphere_set_bounce(ball_.body, 1.0f);
+    sphere_set_bounce(ball_.body, 1.0f);
 
     vec3_set(&pos, 0.1f, 4, 0);
     cars_[0].body = physics_create_sphere(0.5f, &pos, 1.0, 0);

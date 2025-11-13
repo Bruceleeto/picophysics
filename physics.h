@@ -299,6 +299,8 @@ Sphere* sphere_init(Sphere* s, float radius, const Vec3* pos, float mass, BodyKi
 
     vec3_init(&s->body.vel);
     vec3_init(&s->body.acc);
+    vec3_init(&s->body.a_vel);
+    vec3_init(&s->body.a_acc);
     quat_init(&s->body.rot);
     vec3_set(&s->body.pos, pos->xyz[0], pos->xyz[1], pos->xyz[2]);
     s->body.kind = kind;
