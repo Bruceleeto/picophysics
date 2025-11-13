@@ -94,6 +94,7 @@ extern void physics_set_gravity(const Vec3* v);
 extern bool collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind));
 
 extern Sphere* sphere_set_bounce(Sphere* s, float b);
+extern void sphere_add_force(Sphere* s, const Vec3* force);
 
 #ifdef __cplusplus
 }
@@ -208,6 +209,48 @@ Quaternion* quat_init(Quaternion* q) {
     return q;
 }
 
+void quat_from_angular_velocity(const Vec3* a_vel, float dt, Quaternion* q_rot) {
+    float angle = vec3_length(a_vel) * dt; // Calculate the rotation angle
+    if (angle > 0.0f) {
+        Vec3 axis;
+        vec3_assign(&axis, a_vel);
+        vec3_normalize(&axis); // Normalize the angular velocity to get the axis of rotation
+
+        // Calculate sine and cosine of the half angle
+        float sin_half_angle = sinf(angle / 2);
+        float cos_half_angle = cosf(angle / 2);
+
+        // Create the quaternion
+        q_rot->xyzw[0] = axis.xyz[0] * sin_half_angle;
+        q_rot->xyzw[1] = axis.xyz[1] * sin_half_angle;
+        q_rot->xyzw[2] = axis.xyz[2] * sin_half_angle;
+        q_rot->xyzw[3] = cos_half_angle;
+    } else {
+        // If there is no rotation
+        quat_init(q_rot);
+    }
+}
+
+void quat_multiply(const Quaternion* q1, const Quaternion* q2, Quaternion* result) {
+    Quaternion tmp;
+    tmp.xyzw[0] = q1->xyzw[3] * q2->xyzw[0] + q1->xyzw[0] * q2->xyzw[3] + q1->xyzw[1] * q2->xyzw[2] - q1->xyzw[2] * q2->xyzw[1];
+    tmp.xyzw[1] = q1->xyzw[3] * q2->xyzw[1] - q1->xyzw[0] * q2->xyzw[2] + q1->xyzw[1] * q2->xyzw[3] + q1->xyzw[2] * q2->xyzw[0];
+    tmp.xyzw[2] = q1->xyzw[3] * q2->xyzw[2] + q1->xyzw[0] * q2->xyzw[1] - q1->xyzw[1] * q2->xyzw[0] + q1->xyzw[2] * q2->xyzw[3];
+    tmp.xyzw[3] = q1->xyzw[3] * q2->xyzw[3] - q1->xyzw[0] * q2->xyzw[0] - q1->xyzw[1] * q2->xyzw[1] - q1->xyzw[2] * q2->xyzw[2];
+
+    *result = tmp;
+}
+
+void quat_normalize(Quaternion* q) {
+    float norm = sqrtf(q->xyzw[0] * q->xyzw[0] + q->xyzw[1] * q->xyzw[1] + q->xyzw[2] * q->xyzw[2] + q->xyzw[3] * q->xyzw[3]);
+    if (norm > 0) {
+        q->xyzw[0] /= norm;
+        q->xyzw[1] /= norm;
+        q->xyzw[2] /= norm;
+        q->xyzw[3] /= norm;
+    }
+}
+
 Vec3* tri_intersect(const Triangle* tri, const Vec3* o, const Vec3* d, Vec3* out) {
 
     const float e = FLT_EPSILON;
@@ -274,6 +317,19 @@ Sphere* sphere_set_bounce(Sphere* s, float b) {
     return s;
 }
 
+void sphere_add_force(Sphere* s, const Vec3* force) {
+    Vec3 acceleration;
+
+    // Ensure you do not divide by zero
+    if (s->body.mass > 0) {
+        // a = F / m
+        vec3_scale(force, 1.0f / s->body.mass, &acceleration);
+
+        // Add acceleration to the sphere's current acceleration
+        vec3_add(&s->body.acc, &acceleration, &s->body.acc);
+    }
+}
+
 const struct _CollisionMapEntry* collision_map_search(BodyKind kind1, BodyKind kind2) {
     for(int i = 0; i < collision_map_count; ++i) {
         struct _CollisionMapEntry* entry = &collision_map[i];
@@ -298,7 +354,7 @@ bool collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const vo
 }
 
 static void fill_collision_info_sphere_sphere(const Sphere* lhs, const Sphere* rhs, Collision* c) {
-    vec3_sub(&rhs->body.pos, &lhs->body.pos, &c->n);
+    vec3_sub(&lhs->body.pos, &rhs->body.pos, &c->n);
     float l = vec3_length(&c->n);
 
     if(l > 0) {
@@ -379,8 +435,16 @@ void physics_step(float t) {
         // Apply linear damping
         vec3_scale(&sp->body.vel, 1.0f - sp->body.damping, &sp->body.vel);
 
+        Vec3 scaled_ang_vel; // Temporary variable to store scaled angular velocity
+        vec3_scale(&sp->body.a_acc, t, &scaled_ang_vel);
+        vec3_add(&sp->body.a_vel, &scaled_ang_vel, &sp->body.a_vel);
+
+        // Apply angular damping if desired
+        vec3_scale(&sp->body.a_vel, 1.0f - sp->body.a_damping, &sp->body.a_vel);
+
         // Reset the acceleration
         vec3_init(&sp->body.acc);
+        vec3_init(&sp->body.a_acc);
     }
 
     // Move all spheres by their velocity
@@ -392,6 +456,11 @@ void physics_step(float t) {
 
         vec3_scale(&sp->body.vel, t, &scaled_vel);
         vec3_add(&sp->body.pos, &scaled_vel, &sp->body.pos);
+
+        Quaternion q_rot;
+        quat_from_angular_velocity(&sp->body.a_vel, t, &q_rot); // Get rotation quaternion from angular velocity
+        quat_multiply(&sp->body.rot, &q_rot, &sp->body.rot); // Combine with current rotation
+        quat_normalize(&sp->body.rot); // Normalize the quaternion
     }
 
 
@@ -411,35 +480,72 @@ void physics_step(float t) {
             }
 
             float dist = vec3_dist(&lhs->body.pos, &rhs->body.pos);
-            if(dist <= (lhs->radius + rhs->radius)) {
+            if (dist <= (lhs->radius + rhs->radius)) {
                 Collision c;
                 fill_collision_info_sphere_sphere(lhs, rhs, &c);
 
                 bool respond = true;
                 const struct _CollisionMapEntry* cb = collision_map_search(lhs->body.kind, rhs->body.kind);
-                if(cb) {
+                if (cb) {
                     respond = cb->collision_callback(lhs, rhs, lhs->body.kind, rhs->body.kind);
                 }
 
-                if(respond) {
-                    float overlap = dist - (lhs->radius + rhs->radius);
+                if (respond) {
+                    // Correctly calculate overlap
+                    float overlap = (lhs->radius + rhs->radius) - dist;
 
-                    Vec3 add, vel_diff;
-                    vec3_add(&lhs->body.pos, vec3_scale(&c.n, overlap * (rhs->body.mass / (lhs->body.mass + rhs->body.mass)), &add), &lhs->body.pos);
-                    vec3_sub(&rhs->body.pos, vec3_scale(&c.n, overlap * (lhs->body.mass / (lhs->body.mass + rhs->body.mass)), &add), &rhs->body.pos);
+                    // Calculate how much to separate each sphere based on their radii
+                    float totalRadius = lhs->radius + rhs->radius;
 
-                    vec3_sub(&rhs->body.vel, &lhs->body.vel, &vel_diff);
+                    // Calculate the ratio based on the spheres' radii
+                    float lhs_correction = overlap * (lhs->radius / totalRadius);
+                    float rhs_correction = overlap * (rhs->radius / totalRadius);
 
-                    float rel_vel = vec3_dot(&vel_diff, &c.n);
+                    Vec3 add;
 
-                    if(rel_vel < 0) {
-                        // Calculate new velocities based on bounce values
-                        float bounce_factor = (lhs->body.bounce + rhs->body.bounce) / 2;
+                    // Separate left-hand sphere
+                    vec3_scale(&c.n, lhs_correction, &add);
+                    vec3_add(&lhs->body.pos, &add, &lhs->body.pos);
 
+                    // Separate right-hand sphere
+                    vec3_scale(&c.n, -rhs_correction, &add);
+                    vec3_add(&rhs->body.pos, &add, &rhs->body.pos);
+
+                    // Directly calculate relative velocity
+                    float rel_vel = vec3_dot(&rhs->body.vel, &c.n) - vec3_dot(&lhs->body.vel, &c.n);
+
+                    if (rel_vel < 0) {
+                        // Calculate new velocities based on the bounce values
+                        float bounce_factor = (lhs->body.bounce + rhs->body.bounce) / 2; // Average bounce factor
+
+                        // Calculate impulse
                         float impulse = (1 + bounce_factor) * rel_vel / (1 / lhs->body.mass + 1 / rhs->body.mass);
 
-                        vec3_add(&lhs->body.vel, vec3_scale(&c.n, impulse / lhs->body.mass, &add), &lhs->body.vel);
-                        vec3_add(&rhs->body.vel, vec3_scale(&c.n, impulse / rhs->body.mass, &add), &rhs->body.vel);
+                        // Adjustments for the relative velocity
+                        float lhs_impulse = impulse / lhs->body.mass;
+                        float rhs_impulse = impulse / rhs->body.mass;
+
+                        vec3_add(&lhs->body.vel, vec3_scale(&c.n, lhs_impulse, &add), &lhs->body.vel);
+                        vec3_sub(&rhs->body.vel, vec3_scale(&c.n, rhs_impulse, &add), &rhs->body.vel);
+
+                        Vec3 contact_offset_lhs, contact_offset_rhs;
+                        vec3_sub(&c.p, &lhs->body.pos, &contact_offset_lhs);
+                        vec3_sub(&c.p, &rhs->body.pos, &contact_offset_rhs);
+
+                        Vec3 torque_lhs, torque_rhs;
+                        vec3_cross(&contact_offset_lhs, &c.n, &torque_lhs);
+                        vec3_cross(&contact_offset_rhs, &c.n, &torque_rhs);
+
+                        // Assuming a simplified moment of inertia (I) as mass * radius^2 for spheres
+                        float I_lhs = (2.0f / 5.0f) * lhs->body.mass * lhs->radius * lhs->radius;
+                        float I_rhs = (2.0f / 5.0f) * rhs->body.mass * rhs->radius * rhs->radius;
+
+                        // Change in angular velocity due to torque = torque / moment of inertia
+                        float Il = 1.0f / I_lhs;
+                        vec3_scale(&torque_lhs, Il, &lhs->body.a_vel);
+
+                        float Ir = 1.0f / I_rhs;
+                        vec3_scale(&torque_rhs, Ir, &rhs->body.a_vel);
                     }
                 }
             }
@@ -481,6 +587,21 @@ void physics_step(float t) {
                                        2 * lhs->body.bounce * vel_along_normal,
                                        &reflection);
                             vec3_sub(&lhs->body.vel, &reflection, &lhs->body.vel);
+
+                            Vec3 contact_offset;
+                            vec3_sub(&c.p, &lhs->body.pos, &contact_offset);
+
+                            // Calculate torque due to the collision (Torque = r x F)
+                            Vec3 torque;
+                            vec3_cross(&contact_offset, &c.n, &torque);
+
+                            // Assuming a simplified moment of inertia (I) as mass * radius^2 for the sphere
+                            float I = (2.0f / 5.0f) * lhs->body.mass * lhs->radius * lhs->radius;
+
+                            // Change in angular velocity due to torque = torque / moment of inertia
+                            lhs->body.a_vel.xyz[0] += torque.xyz[0] / I;
+                            lhs->body.a_vel.xyz[1] += torque.xyz[1] / I;
+                            lhs->body.a_vel.xyz[2] += torque.xyz[2] / I;
                         }
                     }
                 }

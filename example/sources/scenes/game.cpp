@@ -54,8 +54,15 @@ void GameScene::on_load() {
     Vec3 pos;
     vec3_set(&pos, 0, 2, 0);
 
-    cars_[0].body = physics_create_sphere(1.0f, &pos, 1.0, 0);
-    sphere_set_bounce(cars_[0].body, 1.0f);
+    ball_.body = physics_create_sphere(0.5f, &pos, 1.0, 0);
+    // sphere_set_bounce(ball_.body, 1.0f);
+
+    vec3_set(&pos, 0.1f, 4, 0);
+    cars_[0].body = physics_create_sphere(0.5f, &pos, 1.0, 0);
+    // sphere_set_bounce(cars_[0].body, 1.0f);
+    Vec3 f;
+    vec3_set(&f, 10.0f, 0.0f, 0.0f);
+    sphere_add_force(ball_.body, &f);
 
     define_stadium();
 
@@ -64,18 +71,29 @@ void GameScene::on_load() {
     physics_set_gravity(&grv);
 
     camera_ = create_child<smlt::Camera3D>();
-    camera_->transform->set_position(smlt::Vec3(0, 0.5f, 5));
+    camera_->transform->set_position(smlt::Vec3(0, 5, 10));
+    camera_->transform->look_at(smlt::Vec3());
     camera_->set_perspective_projection(smlt::Degrees(60.0f), window->aspect_ratio());
+
+    auto tex = assets->load_texture("assets/sand.png");
 
     auto mesh = assets->load_mesh("assets/ball/mesh.obj");
     auto s = 1.0f / mesh->aabb().max_dimension();
     mesh->transform_vertices(smlt::Mat4::as_scale(smlt::Vec3(s, s, s)));
 
-    actor_ = create_child<smlt::Actor>(mesh);
+    ball_.actor = create_child<smlt::Actor>(mesh);
+
+    auto floor_mat = assets->load_material(smlt::Material::BuiltIns::TEXTURE_ONLY);
+    floor_mat->set_cull_mode(smlt::CULL_MODE_NONE);
+    floor_mat->set_blend_func(smlt::BLEND_ALPHA);
+    floor_mat->set_base_color_map(tex);
+
+    auto car_mesh1 = assets->create_mesh(smlt::VertexSpecification::POSITION_AND_DIFFUSE);
+    car_mesh1->create_submesh_as_sphere("shell", floor_mat, 1.0f, 10, 10);
+
+    cars_[0].actor = create_child<smlt::Actor>(car_mesh1);
 
     smlt::MeshPtr floor_mesh = assets->create_mesh(smlt::VertexSpecification::POSITION_AND_DIFFUSE);
-    auto floor_mat = assets->clone_default_material();
-    floor_mat->set_cull_mode(smlt::CULL_MODE_NONE);
 
     auto submesh = floor_mesh->create_submesh("floor", floor_mat);
     for(std::size_t i = 0; i < physics_triangle_count(); ++i) {
@@ -84,7 +102,7 @@ void GameScene::on_load() {
         const Triangle* t = physics_triangle_at(i);
         for(int k = 0; k < 3; ++k) {
             floor_mesh->vertex_data->position(t->v[k].xyz[0], t->v[k].xyz[1], t->v[k].xyz[2]);
-            floor_mesh->vertex_data->color(smlt::Color::white());
+            floor_mesh->vertex_data->color(smlt::Color(1.0f, 0.0f, 0.0f, 0.1f));
             floor_mesh->vertex_data->move_next();
         }
 
@@ -93,7 +111,11 @@ void GameScene::on_load() {
 
     floor_mesh->vertex_data->done();
 
-    compositor->create_layer(this, camera_);
+    floor_ = create_child<smlt::Actor>(floor_mesh);
+
+    auto layer = compositor->create_layer(this, camera_);
+    layer->viewport->set_color(smlt::Color::gray());
+    layer->set_clear_flags(smlt::BUFFER_CLEAR_ALL);
 }
 
 void GameScene::on_fixed_update(float step)
@@ -103,11 +125,10 @@ void GameScene::on_fixed_update(float step)
 
 void GameScene::on_update(float dt) {
     auto p = cars_[0].body->body.pos;
-    actor_->transform->set_position(smlt::Vec3(p.xyz[0], p.xyz[1], p.xyz[2]));
+    cars_[0].actor->transform->set_position(smlt::Vec3(p.xyz[0], p.xyz[1], p.xyz[2]));
 
-    if (input->axis_was_pressed("Fire1")) {
-        cars_[0].body->body.pos.xyz[1] = 5.0f;
-    }
+    p = ball_.body->body.pos;
+    ball_.actor->transform->set_position(smlt::Vec3(p.xyz[0], p.xyz[1], p.xyz[2]));
 }
 
 void GameScene::on_activate() {

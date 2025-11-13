@@ -7,7 +7,14 @@
 
 typedef struct _Car {
     Sphere* body;
+    smlt::ActorPtr actor;
 } Car;
+
+typedef struct _Ball
+{
+    Sphere *body;
+    smlt::ActorPtr actor;
+} Ball;
 
 class GameScene : public smlt::Scene {
 public:
@@ -23,7 +30,9 @@ public:
     void on_unload();
 
     Car cars_[4];
+    Ball ball_;
 
     smlt::ActorPtr actor_;
+    smlt::ActorPtr floor_;
     smlt::Camera3D *camera_;
 };
