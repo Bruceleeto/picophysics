@@ -54,6 +54,7 @@ typedef struct _Body {
     float a_damping;
 
     float mass;
+    float friction;
 
     BodyKind kind;
 } Body;
@@ -76,6 +77,7 @@ typedef struct _Triangle {
     Vec3 n;
     Plane p;
     BodyKind kind;
+    float friction;
 } Triangle;
 
 extern Vec3* vec3_init(Vec3* v);
@@ -305,6 +307,7 @@ Sphere* sphere_init(Sphere* s, float radius, const Vec3* pos, float mass, BodyKi
     vec3_set(&s->body.pos, pos->xyz[0], pos->xyz[1], pos->xyz[2]);
     s->body.kind = kind;
     s->body.mass = mass;
+    s->body.friction = 0.3f;
     s->body.damping = 0.0f;
     sphere_set_bounce(s, 0.5f);
     return s;
@@ -397,6 +400,8 @@ Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3
 
     vec3_cross(&e1, &e2, &tri->n);
     vec3_normalize(&tri->n);
+
+    tri->friction = 0.3f;
 
     return tri;
 }
@@ -529,6 +534,24 @@ void physics_step(float t) {
 
                         vec3_add(&lhs->body.vel, vec3_scale(&c.n, lhs_impulse, &add), &lhs->body.vel);
                         vec3_sub(&rhs->body.vel, vec3_scale(&c.n, rhs_impulse, &add), &rhs->body.vel);
+
+                        // Friction calculation
+                        Vec3 friction_vector;
+                        vec3_sub(&rhs->body.vel, vec3_scale(&c.n, -lhs_impulse, &add), &friction_vector); // Relative velocity excluding bounce
+                        float friction_magnitude = vec3_length(&friction_vector);
+
+                        // Calculate the magnitude of the gravity vector
+                        float gravity_magnitude = vec3_length(&gravity);
+
+                        // Calculate friction forces based on coefficients
+                        float friction_force = fmin(lhs->body.friction * lhs->body.mass * gravity_magnitude, rhs->body.friction * rhs->body.mass * gravity_magnitude);
+
+                        // Normalize the friction vector
+                        if (friction_magnitude > 0) {
+                            vec3_scale(&friction_vector, friction_force / friction_magnitude, &friction_vector);
+                            vec3_sub(&lhs->body.vel, &friction_vector, &lhs->body.vel);
+                            vec3_add(&rhs->body.vel, &friction_vector, &rhs->body.vel);
+                        }
 
                         Vec3 contact_offset_lhs, contact_offset_rhs;
                         vec3_sub(&c.p, &lhs->body.pos, &contact_offset_lhs);
