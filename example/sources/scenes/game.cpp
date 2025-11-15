@@ -55,11 +55,11 @@ void GameScene::on_load() {
     vec3_set(&pos, 0, 2, 0);
 
     ball_.body = physics_create_sphere(0.5f, &pos, 1.0, 0);
-    sphere_set_bounce(ball_.body, 1.0f);
+    sphere_set_bounce(ball_.body, 0.3f);
 
     vec3_set(&pos, 0.1f, 4, 0);
     cars_[0].body = physics_create_sphere(0.5f, &pos, 1.0, 0);
-    // sphere_set_bounce(cars_[0].body, 1.0f);
+    sphere_set_bounce(cars_[0].body, 0.1f);
     Vec3 f;
     vec3_set(&f, 10.0f, 0.0f, 0.0f);
     sphere_add_force(ball_.body, &f);
@@ -125,10 +125,20 @@ void GameScene::on_fixed_update(float step)
 
 void GameScene::on_update(float dt) {
     auto p = cars_[0].body->body.pos;
+    auto q = cars_[0].body->body.rot;
     cars_[0].actor->transform->set_position(smlt::Vec3(p.xyz[0], p.xyz[1], p.xyz[2]));
+    cars_[0].actor->transform->set_orientation(
+        smlt::Quaternion(q.xyzw[0], q.xyzw[1], q.xyzw[2], q.xyzw[3]));
 
     p = ball_.body->body.pos;
+    q = ball_.body->body.rot;
     ball_.actor->transform->set_position(smlt::Vec3(p.xyz[0], p.xyz[1], p.xyz[2]));
+    ball_.actor->transform->set_orientation(
+        smlt::Quaternion(q.xyzw[0], q.xyzw[1], q.xyzw[2], q.xyzw[3]));
+
+    Vec3 f;
+    vec3_set(&f, 5.0f * input->axis_value("Horizontal"), 0, 0);
+    sphere_add_force(ball_.body, &f);
 }
 
 void GameScene::on_activate() {
