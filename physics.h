@@ -76,14 +76,8 @@ typedef struct _Sphere {
     Body body;
     float radius;
     bool is_alive;
+    void* user_data;
 } Sphere;
-
-typedef struct _OBB {
-    Body body;
-    Vec3 extents;
-    Vec3 axes[3];
-    bool is_alive;
-} OBB;
 
 typedef struct _Triangle {
     Vec3 v[3];
@@ -114,9 +108,16 @@ extern void sphere_add_force(Sphere* s, float x, float y, float z);
 extern void sphere_add_angular_force(Sphere* s, float x, float y, float z);
 extern void sphere_lock_axis(Sphere* s, AxisLock lock);
 extern void sphere_set_angular_damping(Sphere* s, float d);
+extern void sphere_set_damping(Sphere* s, float d);
 extern void sphere_get_forward(Sphere* s, Vec3* f);
-extern void sphere_set_position(Sphere*s, float x, float y, float z);
-extern void sphere_get_position(Sphere*s, Vec3* pos);
+extern void sphere_set_position(Sphere* s, float x, float y, float z);
+extern void sphere_get_position(Sphere* s, Vec3* pos);
+extern float sphere_get_radius(Sphere* s);
+extern void sphere_set_user_data(Sphere* s, void* data);
+extern void* sphere_get_user_data(const Sphere* s);
+
+// Given a direction vector, this will apply a force to attempt to look towards it
+extern void sphere_look_at(Sphere* s, float x, float y, float z);
 
 #ifdef __cplusplus
 }
@@ -232,6 +233,14 @@ Quaternion* quat_init(Quaternion* q) {
     return q;
 }
 
+Quaternion* quat_set(Quaternion* q, float x, float y, float z, float w) {
+    q->xyzw[0] = x;
+    q->xyzw[1] = y;
+    q->xyzw[2] = z;
+    q->xyzw[3] = w;
+    return q;
+}
+
 void quat_from_angular_velocity(const Vec3* a_vel, float dt, Quaternion* q_rot) {
     float angle = vec3_length(a_vel) * dt; // Calculate the rotation angle
     if (angle > 0.0f) {
@@ -336,13 +345,94 @@ void sphere_set_angular_damping(Sphere* s, float d) {
     s->body.a_damping = d;
 }
 
+void sphere_set_damping(Sphere* s, float d) {
+    if(d < 0.0f || d > 1.0f) {
+        return;
+    }
+
+    s->body.damping = d;
+}
+
 void sphere_get_forward(Sphere* s, Vec3* f) {
     quat_forward(&s->body.rot, f);
+}
+
+float sphere_get_radius(Sphere* s) {
+    return s->radius;
+}
+
+void quat_from_axis_angle(Quaternion* q, const Vec3* axis, float angle) {
+    Vec3 a;
+    vec3_assign(&a, axis);
+    vec3_normalize(&a);
+
+    float half = angle * 0.5f;
+    float s = sinf(half);   // sin(θ/2)
+    float c = cosf(half);   // cos(θ/2)
+
+    q->xyzw[0] = a.xyz[0] * s;   // axis.x * sin(θ/2)
+    q->xyzw[1] = a.xyz[1] * s;   // axis.y * sin(θ/2)
+    q->xyzw[2] = a.xyz[2] * s;   // axis.z * sin(θ/2)
+    q->xyzw[3] = c;         // cos(θ/2)
+
+    quat_normalize(q);
+}
+
+void sphere_look_at(Sphere* s, float x, float y, float z) {
+    Vec3 t, f, c;
+    vec3_set(&t, x, y, z);
+    sphere_get_forward(s, &f);
+    vec3_cross(&f, &t, &c);
+    float d = vec3_dot(&f, &t);
+
+    // Build error quaternion
+    Quaternion q_err;
+    if (d < -0.9999f) {                     // opposite direction
+        Vec3 ortho, axis;
+        if(fabsf(f.xyz[0]) < 0.9f) {
+            vec3_set(&ortho, 1, 0, 0);
+        } else {
+            vec3_set(&ortho, 0, 1, 0);
+        }
+
+        vec3_cross(&f, &ortho, &axis);
+        vec3_normalize(&axis);
+
+        // 180° rotation
+        quat_from_axis_angle(&q_err, &axis, M_PI);
+    } else {
+        Vec3 axis;
+        float s = sqrtf((1.0f + d) * 2.0f);
+        axis.xyz[0] = c.xyz[0] / s;
+        axis.xyz[1] = c.xyz[1] / s;
+        axis.xyz[2] = c.xyz[2] / s;
+
+        quat_set(&q_err, axis.xyz[0], axis.xyz[1], axis.xyz[2], s * 0.5f);
+    }
+
+    quat_normalize(&q_err);
+
+    // Angular error vector (approximation)
+    Vec3 error;
+    vec3_set(&error, 2.0f * q_err.xyzw[0], 2.0f * q_err.xyzw[1], 2.0f * q_err.xyzw[2]);
+
+    Vec3 torque, a, b;
+
+    // Configurable
+    float kp = 10.0f;
+    float kd = 1.0f;
+
+    // Vector3 torque = -cfg.kp * error - cfg.kd * a_vel;
+    vec3_scale(&error, -kp, &a);
+    vec3_scale(&s->body.a_vel, kd, &b);
+    vec3_sub(&a, &b, &torque);
+    sphere_add_angular_force(s, torque.xyz[0], torque.xyz[1], torque.xyz[2]);
 }
 
 Sphere* sphere_init(Sphere* s, float radius, const Vec3* pos, float mass, BodyKind kind) {
     s->radius = radius;
     s->is_alive = true;
+    s->user_data = NULL;
 
     vec3_init(&s->body.vel);
     vec3_init(&s->body.acc);
@@ -357,6 +447,14 @@ Sphere* sphere_init(Sphere* s, float radius, const Vec3* pos, float mass, BodyKi
     s->body.a_damping = 0.02f;
     sphere_set_bounce(s, 0.5f);
     return s;
+}
+
+void sphere_set_user_data(Sphere* s, void* data) {
+    s->user_data = data;
+}
+
+void* sphere_get_user_data(const Sphere* s) {
+    return s->user_data;
 }
 
 void sphere_lock_axis(Sphere* s, AxisLock lock) {
@@ -477,6 +575,7 @@ Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3
     vec3_normalize(&tri->n);
 
     tri->friction = 0.3f;
+    tri->kind = kind;
 
     return tri;
 }

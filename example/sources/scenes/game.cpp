@@ -5,9 +5,15 @@
 #include "../physics.h"
 
 #define CAR_BODY_KIND 1
-#define CAR_SHELL_KIND 2
+#define CAR_INNER_KIND 2
 #define BALL_KIND 3
-#define ENV_KIND 0
+
+/* These are different things because we want the bigger
+ * car sphere (body) to collide with walls, but if it collides
+ * with the floor the car will float in the air. The smaller sphere
+ * (inner) collides with the floor only */
+#define ENV_FLOOR_KIND 4
+#define ENV_WALL_KIND 5
 
 void define_stadium()
 {
@@ -21,8 +27,8 @@ void define_stadium()
     vec3_set(&v2, -50, 0, 50);
     vec3_set(&v3, 50, 0, 50);
     vec3_set(&v4, 50, 0, -50);
-    auto f1 = physics_create_triangle(&v1, &v2, &v3, ENV_KIND);
-    auto f2 = physics_create_triangle(&v1, &v3, &v4, ENV_KIND);
+    auto f1 = physics_create_triangle(&v1, &v2, &v3, ENV_FLOOR_KIND);
+    auto f2 = physics_create_triangle(&v1, &v3, &v4, ENV_FLOOR_KIND);
 
     assert(f1->n.xyz[1] > 0.0f);
     assert(f2->n.xyz[1] > 0.0f);
@@ -39,8 +45,8 @@ void define_stadium()
     vec3_set(&v3, -hw, h, -hd);
     vec3_set(&v4, -hw, h, hd);
 
-    auto lw1 = physics_create_triangle(&v1, &v2, &v3, ENV_KIND);
-    auto lw2 = physics_create_triangle(&v1, &v3, &v4, ENV_KIND);
+    auto lw1 = physics_create_triangle(&v1, &v2, &v3, ENV_WALL_KIND);
+    auto lw2 = physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
     assert(lw1->n.xyz[0] > 0.0f);
     assert(lw2->n.xyz[0] > 0.0f);
 
@@ -49,34 +55,33 @@ void define_stadium()
     vec3_set(&v3, hw, h, hd);
     vec3_set(&v4, hw, h, -hd);
 
-    auto rw1 = physics_create_triangle(&v1, &v2, &v3, ENV_KIND);
-    auto rw2 = physics_create_triangle(&v1, &v3, &v4, ENV_KIND);
+    auto rw1 = physics_create_triangle(&v1, &v2, &v3, ENV_WALL_KIND);
+    auto rw2 = physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
     assert(rw1->n.xyz[0] < 0.0f);
     assert(rw2->n.xyz[0] < 0.0f);
 }
 
-/* Collision between a body and a shell should be ignored */
-bool car_body_car_shell(const void *, const void *, BodyKind, BodyKind)
+bool dont_collide(const void *, const void *, BodyKind, BodyKind)
 {
     return false;
 }
 
-/* Car shell should only collide with the environment, not other cars
- * or balls */
-bool car_shell_ball(const void *, const void *, BodyKind, BodyKind)
+bool ground_check(const void *lhs, const void *rhs, BodyKind k0, BodyKind k1)
 {
-    return false;
-}
-
-bool car_body_env(const void *, const void *, BodyKind, BodyKind)
-{
-    return false;
+    // Abuse the user data pointer to store the grounded flag
+    if (k0 == CAR_INNER_KIND) {
+        sphere_set_user_data((Sphere *) lhs, (void *) 1);
+    } else {
+        sphere_set_user_data((Sphere *) rhs, (void *) 1);
+    }
+    return true;
 }
 
 void GameScene::on_load() {
-    collision_map_add(CAR_BODY_KIND, CAR_SHELL_KIND, &car_body_car_shell);
-    collision_map_add(CAR_SHELL_KIND, BALL_KIND, &car_shell_ball);
-    collision_map_add(CAR_BODY_KIND, ENV_KIND, &car_body_env);
+    collision_map_add(CAR_BODY_KIND, CAR_INNER_KIND, &dont_collide);
+    collision_map_add(CAR_INNER_KIND, BALL_KIND, &dont_collide);
+    collision_map_add(CAR_BODY_KIND, ENV_FLOOR_KIND, &dont_collide);
+    collision_map_add(CAR_INNER_KIND, ENV_FLOOR_KIND, &ground_check);
 
     auto car_mesh2 = assets->load_mesh("assets/car/sedan-sports.obj");
     float cs = 1.0f / car_mesh2->aabb().max_dimension();
@@ -91,9 +96,10 @@ void GameScene::on_load() {
     cars_[0].shell = physics_create_sphere(0.5f,
                                            &pos,
                                            car_mesh2->aabb().height() / 2,
-                                           CAR_SHELL_KIND);
+                                           CAR_INNER_KIND);
     sphere_lock_axis(cars_[0].body, AXIS_LOCK_PITCH_AND_ROLL);
-    sphere_set_angular_damping(cars_[0].body, 0.3f);
+    sphere_set_angular_damping(cars_[0].body, 0.25f);
+    sphere_set_damping(cars_[0].shell, 0.001f);
 
     auto tex = assets->load_texture("assets/sand.png");
     auto floor_mat = assets->load_material(smlt::Material::BuiltIns::TEXTURE_ONLY);
@@ -156,11 +162,24 @@ void GameScene::on_load() {
 
 void GameScene::on_fixed_update(float step)
 {
+    sphere_set_user_data(cars_[0].shell, (void *) 0);
+
     physics_step(step);
 
-    Vec3 pos;
-    sphere_get_position(cars_[0].shell, &pos);
-    sphere_set_position(cars_[0].body, pos.xyz[0], pos.xyz[1], pos.xyz[2]);
+    // The inner ball rolls on the floor
+    // The body collides with walls, balls, and cars
+    // The body needs to be positioned above the inner ball (which is smaller)
+
+    Vec3 inner_pos;
+    sphere_get_position(cars_[0].shell, &inner_pos);
+    float br = sphere_get_radius(cars_[0].body);
+    float ir = sphere_get_radius(cars_[0].shell);
+
+    // Align the car body with the inner shell
+    sphere_set_position(cars_[0].body,
+                        inner_pos.xyz[0],
+                        inner_pos.xyz[1] + (br - ir),
+                        inner_pos.xyz[2]);
 }
 
 void GameScene::on_update(float dt) {
@@ -187,6 +206,13 @@ void GameScene::on_update(float dt) {
     sphere_get_forward(cars_[0].body, &f);
     vec3_scale(&f, 20.0f * input->axis_value("Vertical"), &f);
     sphere_add_force(cars_[0].shell, f.xyz[0], f.xyz[1], f.xyz[2]);
+
+    bool grounded = (bool) sphere_get_user_data(cars_[0].shell);
+    if (input->axis_was_pressed("Fire1") && grounded) {
+        sphere_add_force(cars_[0].shell, 0, 100.0f, 0);
+    }
+
+    camera_->transform->look_at(cars_[0].body_actor->transform->position());
 }
 
 void GameScene::on_activate() {
