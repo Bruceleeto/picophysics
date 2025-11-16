@@ -7,7 +7,10 @@
 
 typedef struct _Car {
     Sphere* body;
-    smlt::ActorPtr actor;
+    Sphere *shell;
+
+    smlt::ActorPtr body_actor;
+    smlt::ActorPtr shell_actor;
 } Car;
 
 typedef struct _Ball

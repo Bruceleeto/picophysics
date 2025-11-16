@@ -40,6 +40,17 @@ typedef struct _Collision {
     BodyKind kind2;
 } Collision;
 
+enum AxisLock {
+    AXIS_LOCK_NONE,
+    AXIS_LOCK_PITCH = 0x1,
+    AXIS_LOCK_YAW = 0x2,
+    AXIS_LOCK_ROLL = 0x4,
+    AXIS_LOCK_PITCH_AND_ROLL = AXIS_LOCK_PITCH | AXIS_LOCK_ROLL,
+    AXIS_LOCK_PITCH_AND_YAW = AXIS_LOCK_PITCH | AXIS_LOCK_YAW,
+    AXIS_LOCK_YAW_AND_ROLL = AXIS_LOCK_YAW | AXIS_LOCK_ROLL,
+    AXIS_LOCK_ALL = AXIS_LOCK_PITCH | AXIS_LOCK_YAW | AXIS_LOCK_ROLL
+};
+
 typedef struct _Body {
     Vec3 pos;
     float bounce;
@@ -57,6 +68,8 @@ typedef struct _Body {
     float friction;
 
     BodyKind kind;
+
+    AxisLock lock;
 } Body;
 
 typedef struct _Sphere {
@@ -82,6 +95,7 @@ typedef struct _Triangle {
 
 extern Vec3* vec3_init(Vec3* v);
 extern Vec3* vec3_set(Vec3* v, float x, float y, float z);
+extern Vec3* vec3_scale(const Vec3* v1, float t, Vec3* out);
 
 extern void physics_step(float t);
 
@@ -96,7 +110,13 @@ extern void physics_set_gravity(const Vec3* v);
 extern bool collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind));
 
 extern Sphere* sphere_set_bounce(Sphere* s, float b);
-extern void sphere_add_force(Sphere* s, const Vec3* force);
+extern void sphere_add_force(Sphere* s, float x, float y, float z);
+extern void sphere_add_angular_force(Sphere* s, float x, float y, float z);
+extern void sphere_lock_axis(Sphere* s, AxisLock lock);
+extern void sphere_set_angular_damping(Sphere* s, float d);
+extern void sphere_get_forward(Sphere* s, Vec3* f);
+extern void sphere_set_position(Sphere*s, float x, float y, float z);
+extern void sphere_get_position(Sphere*s, Vec3* pos);
 
 #ifdef __cplusplus
 }
@@ -254,6 +274,18 @@ void quat_normalize(Quaternion* q) {
     }
 }
 
+static void quat_forward(const Quaternion* q, Vec3* out)
+{
+    float x = q->xyzw[0];
+    float y = q->xyzw[1];
+    float z = q->xyzw[2];
+    float w = q->xyzw[3];
+
+    out->xyz[0] = 2.0f * (x * z + w * y);
+    out->xyz[1] = 2.0f * (y * z - w * x);
+    out->xyz[2] = 1.0f - 2.0f * (x * x + y * y);
+}
+
 Vec3* tri_intersect(const Triangle* tri, const Vec3* o, const Vec3* d, Vec3* out) {
 
     const float e = FLT_EPSILON;
@@ -296,6 +328,18 @@ Vec3* tri_intersect(const Triangle* tri, const Vec3* o, const Vec3* d, Vec3* out
 
 Sphere* sphere_set_bounce(Sphere* s, float b);
 
+void sphere_set_angular_damping(Sphere* s, float d) {
+    if(d < 0.0f || d > 1.0f) {
+        return;
+    }
+
+    s->body.a_damping = d;
+}
+
+void sphere_get_forward(Sphere* s, Vec3* f) {
+    quat_forward(&s->body.rot, f);
+}
+
 Sphere* sphere_init(Sphere* s, float radius, const Vec3* pos, float mass, BodyKind kind) {
     s->radius = radius;
     s->is_alive = true;
@@ -315,6 +359,18 @@ Sphere* sphere_init(Sphere* s, float radius, const Vec3* pos, float mass, BodyKi
     return s;
 }
 
+void sphere_lock_axis(Sphere* s, AxisLock lock) {
+    s->body.lock = lock;
+}
+
+void sphere_get_position(Sphere*s, Vec3* pos) {
+    vec3_assign(pos, &s->body.pos);
+}
+
+void sphere_set_position(Sphere*s, float x, float y, float z) {
+    vec3_set(&s->body.pos, x, y, z);
+}
+
 Sphere* sphere_set_bounce(Sphere* s, float b) {
     if(b < 0.0f || b > 1.0f) {
         return NULL;
@@ -324,17 +380,34 @@ Sphere* sphere_set_bounce(Sphere* s, float b) {
     return s;
 }
 
-void sphere_add_force(Sphere* s, const Vec3* force) {
+void sphere_add_force(Sphere* s, float x, float y, float z) {
+    Vec3 force;
+    vec3_set(&force, x, y, z);
+
     Vec3 acceleration;
 
     // Ensure you do not divide by zero
     if (s->body.mass > 0) {
         // a = F / m
-        vec3_scale(force, 1.0f / s->body.mass, &acceleration);
+        vec3_scale(&force, 1.0f / s->body.mass, &acceleration);
 
         // Add acceleration to the sphere's current acceleration
         vec3_add(&s->body.acc, &acceleration, &s->body.acc);
     }
+}
+
+void sphere_add_angular_force(Sphere* s, float tx, float ty, float tz)
+{
+    Vec3 torque;
+    vec3_set(&torque, tx, ty, tz);
+
+    float I = (2.0f / 5.0f) * s->body.mass * s->radius * s->radius;
+
+    if (I <= 0.0f) return;   // nothing to do for mass‑less or zero‑radius objects
+
+    Vec3 ang_acc;
+    vec3_scale(&torque, 1.0f / I, &ang_acc);
+    vec3_add(&s->body.a_acc, &ang_acc, &s->body.a_acc);
 }
 
 const struct _CollisionMapEntry* collision_map_search(BodyKind kind1, BodyKind kind2) {
@@ -444,6 +517,23 @@ void physics_step(float t) {
 
         // Apply linear damping
         vec3_scale(&sp->body.vel, 1.0f - sp->body.damping, &sp->body.vel);
+
+        if(sp->body.lock) {
+            if((sp->body.lock & AXIS_LOCK_PITCH) == AXIS_LOCK_PITCH) {
+                sp->body.a_acc.xyz[0] = 0.0f;
+                sp->body.a_vel.xyz[0] = 0.0f;
+            }
+
+            if((sp->body.lock & AXIS_LOCK_YAW) == AXIS_LOCK_YAW) {
+                sp->body.a_acc.xyz[1] = 0.0f;
+                sp->body.a_vel.xyz[1] = 0.0f;
+            }
+
+            if((sp->body.lock & AXIS_LOCK_ROLL) == AXIS_LOCK_ROLL) {
+                sp->body.a_acc.xyz[2] = 0.0f;
+                sp->body.a_vel.xyz[2] = 0.0f;
+            }
+        }
 
         Vec3 scaled_ang_vel; // Temporary variable to store scaled angular velocity
         vec3_scale(&sp->body.a_acc, t, &scaled_ang_vel);
