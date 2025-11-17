@@ -574,7 +574,7 @@ Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3
     vec3_cross(&e1, &e2, &tri->n);
     vec3_normalize(&tri->n);
 
-    tri->friction = 0.3f;
+    tri->friction = 0.1f;
     tri->kind = kind;
 
     return tri;

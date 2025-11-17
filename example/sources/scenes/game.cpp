@@ -99,7 +99,6 @@ void GameScene::on_load() {
                                            CAR_INNER_KIND);
     sphere_lock_axis(cars_[0].body, AXIS_LOCK_PITCH_AND_ROLL);
     sphere_set_angular_damping(cars_[0].body, 0.25f);
-    sphere_set_damping(cars_[0].shell, 0.001f);
 
     auto tex = assets->load_texture("assets/sand.png");
     auto floor_mat = assets->load_material(smlt::Material::BuiltIns::TEXTURE_ONLY);
@@ -163,6 +162,7 @@ void GameScene::on_load() {
 void GameScene::on_fixed_update(float step)
 {
     sphere_set_user_data(cars_[0].shell, (void *) 0);
+    sphere_set_damping(cars_[0].shell, 0.01f);
 
     physics_step(step);
 
@@ -202,14 +202,21 @@ void GameScene::on_update(float dt) {
         smlt::Quaternion(q.xyzw[0], q.xyzw[1], q.xyzw[2], q.xyzw[3]));
 
     sphere_add_angular_force(cars_[0].body, 0, -10.0f * input->axis_value("Horizontal"), 0);
+
     Vec3 f;
     sphere_get_forward(cars_[0].body, &f);
-    vec3_scale(&f, 20.0f * input->axis_value("Vertical"), &f);
-    sphere_add_force(cars_[0].shell, f.xyz[0], f.xyz[1], f.xyz[2]);
 
     bool grounded = (bool) sphere_get_user_data(cars_[0].shell);
-    if (input->axis_was_pressed("Fire1") && grounded) {
-        sphere_add_force(cars_[0].shell, 0, 100.0f, 0);
+    if (grounded) {
+        vec3_scale(&f, 10.0f * input->axis_value("Vertical"), &f);
+        sphere_add_force(cars_[0].shell, f.xyz[0], f.xyz[1], f.xyz[2]);
+
+        if (input->axis_was_pressed("Fire1") && grounded) {
+            sphere_add_force(cars_[0].shell, 0, 100.0f, 0);
+        }
+    } else {
+        vec3_scale(&f, 0.5f * input->axis_value("Vertical"), &f);
+        sphere_add_force(cars_[0].shell, f.xyz[0], f.xyz[1], f.xyz[2]);
     }
 
     camera_->transform->look_at(cars_[0].body_actor->transform->position());
