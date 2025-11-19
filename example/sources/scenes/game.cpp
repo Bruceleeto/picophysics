@@ -59,6 +59,67 @@ void define_stadium()
     auto rw2 = physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
     assert(rw1->n.xyz[0] < 0.0f);
     assert(rw2->n.xyz[0] < 0.0f);
+
+    float qw = hw * 0.5f;
+
+    // Back wall
+    vec3_set(&v1, -qw, 0, -hd);
+    vec3_set(&v2, qw, 0, -hd);
+    vec3_set(&v3, qw, h, -hd);
+    vec3_set(&v4, -qw, h, -hd);
+
+    auto bw1 = physics_create_triangle(&v1, &v2, &v3, ENV_WALL_KIND);
+    auto bw2 = physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
+    assert(bw1->n.xyz[2] > 0.0f);
+    assert(bw2->n.xyz[2] > 0.0f);
+
+    vec3_set(&v1, qw, 0, hd);
+    vec3_set(&v2, -qw, 0, hd);
+    vec3_set(&v3, -qw, h, hd);
+    vec3_set(&v4, qw, h, hd);
+
+    auto fw1 = physics_create_triangle(&v1, &v2, &v3, ENV_WALL_KIND);
+    auto fw2 = physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
+    assert(fw1->n.xyz[2] < 0.0f);
+    assert(fw2->n.xyz[2] < 0.0f);
+
+    float qd = hd * 0.4f;
+
+    // Back left angled
+    vec3_set(&v1, -qw, 0, -hd);
+    vec3_set(&v2, -qw, h, -hd);
+    vec3_set(&v3, -hw, h, -qd);
+    vec3_set(&v4, -hw, 0, -qd);
+
+    physics_create_triangle(&v1, &v2, &v3, ENV_WALL_KIND);
+    physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
+
+    // Back right angled
+    vec3_set(&v1, qw, 0, -hd);
+    vec3_set(&v2, hw, 0, -qd);
+    vec3_set(&v3, hw, h, -qd);
+    vec3_set(&v4, qw, h, -hd);
+
+    physics_create_triangle(&v1, &v2, &v3, ENV_WALL_KIND);
+    physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
+
+    // Front left angled
+    vec3_set(&v1, -qw, 0, hd);
+    vec3_set(&v2, -hw, 0, qd);
+    vec3_set(&v3, -hw, h, qd);
+    vec3_set(&v4, -qw, h, hd);
+
+    physics_create_triangle(&v1, &v2, &v3, ENV_WALL_KIND);
+    physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
+
+    // Front right angled
+    vec3_set(&v1, qw, 0, hd);
+    vec3_set(&v2, qw, h, hd);
+    vec3_set(&v3, hw, h, qd);
+    vec3_set(&v4, hw, 0, qd);
+
+    physics_create_triangle(&v1, &v2, &v3, ENV_WALL_KIND);
+    physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
 }
 
 bool dont_collide(const void *, const void *, BodyKind, BodyKind)
@@ -124,9 +185,9 @@ void GameScene::on_load() {
     physics_set_gravity(&grv);
 
     camera_ = create_child<smlt::Camera3D>();
-    camera_->transform->set_position(smlt::Vec3(0, 5, 10));
-    camera_->transform->look_at(smlt::Vec3());
     camera_->set_perspective_projection(smlt::Degrees(60.0f), window->aspect_ratio());
+    camera_->transform->set_position(smlt::Vec3(0, 10, 0));
+    camera_->transform->look_at(smlt::Vec3());
 
     auto mesh = assets->load_mesh("assets/ball/mesh.obj");
     auto s = 1.0f / mesh->aabb().max_dimension();
@@ -219,7 +280,9 @@ void GameScene::on_update(float dt) {
         sphere_add_force(cars_[0].shell, f.xyz[0], f.xyz[1], f.xyz[2]);
     }
 
-    camera_->transform->look_at(cars_[0].body_actor->transform->position());
+    camera_->transform->look_at(cars_[0].body_actor->transform->position(), smlt::Vec3::forward());
+    camera_->transform->set_position(cars_[0].body_actor->transform->position()
+                                     + smlt::Vec3(0, 20, 0));
 }
 
 void GameScene::on_activate() {
