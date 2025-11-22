@@ -150,7 +150,7 @@ void GameScene::on_load() {
 
     Vec3 pos;
     vec3_set(&pos, 0, 2, 0);
-    ball_.body = physics_create_sphere(0.5f, &pos, 1.0, BALL_KIND);
+    ball_.body = physics_create_sphere(0.5f, &pos, 0.01f, BALL_KIND);
 
     vec3_set(&pos, 1.0f, 4, 0);
     cars_[0].body = physics_create_sphere(0.5f, &pos, 1.0, CAR_BODY_KIND);
@@ -173,7 +173,7 @@ void GameScene::on_load() {
     cars_[0].shell_actor = create_child<smlt::Actor>(car_mesh1);
     cars_[0].body_actor = create_child<smlt::Actor>(car_mesh2);
 
-    sphere_set_bounce(ball_.body, 0.3f);
+    sphere_set_bounce(ball_.body, 0.9f);
     sphere_set_bounce(cars_[0].body, 0.1f);
     sphere_set_bounce(cars_[0].shell, 0.1f);
 
@@ -186,7 +186,7 @@ void GameScene::on_load() {
 
     camera_ = create_child<smlt::Camera3D>();
     camera_->set_perspective_projection(smlt::Degrees(60.0f), window->aspect_ratio());
-    camera_->transform->set_position(smlt::Vec3(0, 10, 0));
+    camera_->transform->set_position(smlt::Vec3(0, 10, 8));
     camera_->transform->look_at(smlt::Vec3());
 
     auto mesh = assets->load_mesh("assets/ball/mesh.obj");
@@ -280,9 +280,9 @@ void GameScene::on_update(float dt) {
         sphere_add_force(cars_[0].shell, f.xyz[0], f.xyz[1], f.xyz[2]);
     }
 
-    camera_->transform->look_at(cars_[0].body_actor->transform->position(), smlt::Vec3::forward());
-    camera_->transform->set_position(cars_[0].body_actor->transform->position()
-                                     + smlt::Vec3(0, 20, 0));
+    camera_->transform->look_at(cars_[0].body_actor->transform->position(), smlt::Vec3::up());
+    // camera_->transform->set_position(cars_[0].body_actor->transform->position()
+    //                                  + smlt::Vec3(0, 20, 0));
 }
 
 void GameScene::on_activate() {

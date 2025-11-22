@@ -613,6 +613,7 @@ void physics_step(float t) {
 
         vec3_scale(&sp->body.acc, t, &scaled_vel);
         vec3_add(&sp->body.vel, &scaled_vel, &sp->body.vel);
+        vec3_init(&sp->body.acc);
 
         // Apply linear damping
         vec3_scale(&sp->body.vel, 1.0f - sp->body.damping, &sp->body.vel);
@@ -642,7 +643,6 @@ void physics_step(float t) {
         vec3_scale(&sp->body.a_vel, 1.0f - sp->body.a_damping, &sp->body.a_vel);
 
         // Reset the acceleration
-        vec3_init(&sp->body.acc);
         vec3_init(&sp->body.a_acc);
     }
 
@@ -690,87 +690,46 @@ void physics_step(float t) {
                 }
 
                 if (respond) {
-                    // Correctly calculate overlap
                     float overlap = (lhs->radius + rhs->radius) - dist;
 
-                    // Calculate how much to separate each sphere based on their radii
-                    float totalRadius = lhs->radius + rhs->radius;
+                    Vec3 adjustment_lhs, adjustment_rhs;
+                    vec3_scale(&c.n, overlap * 0.5f, &adjustment_lhs);
+                    vec3_scale(&c.n, overlap * 0.5f, &adjustment_rhs);
+                    vec3_add(&lhs->body.pos, &adjustment_lhs, &lhs->body.pos);
+                    vec3_sub(&rhs->body.pos, &adjustment_rhs, &rhs->body.pos);
 
-                    // Calculate the ratio based on the spheres' radii
-                    float lhs_correction = overlap * (lhs->radius / totalRadius);
-                    float rhs_correction = overlap * (rhs->radius / totalRadius);
+                    Vec3 rel_vel;
+                    vec3_sub(&rhs->body.vel, &lhs->body.vel, &rel_vel);   // v_rhs – v_lhs
+                    float vel_along_normal = vec3_dot(&rel_vel, &c.n);
+                    if (vel_along_normal < 0) {
+                        Vec3 penetration, tangent;
+                        vec3_scale(&c.n, vel_along_normal, &penetration);
+                        vec3_sub(&rel_vel, &penetration, &tangent);
 
-                    Vec3 add;
+                        // Moving towards each other
+                        float r = fmax(lhs->body.bounce, rhs->body.bounce);
+                        float f = fmin(lhs->body.friction, rhs->body.friction);
 
-                    // Separate left-hand sphere
-                    vec3_scale(&c.n, lhs_correction, &add);
-                    vec3_add(&lhs->body.pos, &add, &lhs->body.pos);
+                        float inv_mass_sum = (1.0f / lhs->body.mass) + (1.0f / rhs->body.mass);
+                        float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
+                        Vec3 impulse_n;
+                        vec3_scale(&c.n, j_n, &impulse_n);
 
-                    // Separate right-hand sphere
-                    vec3_scale(&c.n, -rhs_correction, &add);
-                    vec3_add(&rhs->body.pos, &add, &rhs->body.pos);
+                        float jt = -vec3_dot(&rel_vel, &tangent) / inv_mass_sum;
+                        jt = fmax(-j_n * f, fmin(jt, j_n * f));   // clamp to μ·|j_n|
+                        Vec3 impulse_t;
+                        vec3_normalize(&tangent);      // ensure unit tangent
+                        vec3_scale(&tangent, jt, &impulse_t);
 
-                    // Directly calculate relative velocity
-                    float rel_vel = vec3_dot(&rhs->body.vel, &c.n) - vec3_dot(&lhs->body.vel, &c.n);
+                        Vec3 impulse;
+                        vec3_add(&impulse_n, &impulse_t, &impulse);
 
-                    if (rel_vel < 0) {
-                        // Calculate new velocities based on the bounce values
-                        float bounce_factor = fmax(lhs->body.bounce, rhs->body.bounce);
+                        Vec3 dv_lhs, dv_rhs;
+                        vec3_scale(&impulse,  1.0f / lhs->body.mass, &dv_lhs);
+                        vec3_scale(&impulse,  1.0f / rhs->body.mass, &dv_rhs);
 
-                        // Calculate impulse
-                        float impulse = (1 + bounce_factor) * rel_vel / (1 / lhs->body.mass + 1 / rhs->body.mass);
-
-                        // Adjustments for the relative velocity
-                        float lhs_impulse = impulse / lhs->body.mass;
-                        float rhs_impulse = impulse / rhs->body.mass;
-
-                        vec3_add(&lhs->body.vel, vec3_scale(&c.n, lhs_impulse, &add), &lhs->body.vel);
-                        vec3_sub(&rhs->body.vel, vec3_scale(&c.n, rhs_impulse, &add), &rhs->body.vel);
-
-                        // Friction calculation
-                        Vec3 friction_vector;
-                        vec3_sub(&rhs->body.vel, vec3_scale(&c.n, -lhs_impulse, &add), &friction_vector); // Relative velocity excluding bounce
-                        float friction_magnitude = vec3_length(&friction_vector);
-
-                        // Calculate friction forces based on coefficients
-                        float friction_force = fmin(lhs->body.friction * lhs->body.mass * gravity_magnitude, rhs->body.friction * rhs->body.mass * gravity_magnitude);
-
-                        // Normalize the friction vector
-                        if (friction_magnitude > 0) {
-                            vec3_scale(&friction_vector, friction_force / friction_magnitude, &friction_vector);
-                            vec3_sub(&lhs->body.vel, &friction_vector, &lhs->body.vel);
-                            vec3_add(&rhs->body.vel, &friction_vector, &rhs->body.vel);
-                        }
-
-                        Vec3 contact_offset_lhs, contact_offset_rhs;
-                        vec3_sub(&c.p, &lhs->body.pos, &contact_offset_lhs);
-                        vec3_sub(&c.p, &rhs->body.pos, &contact_offset_rhs);
-
-                        Vec3 torque_lhs, torque_rhs;
-                        vec3_cross(&contact_offset_lhs, &c.n, &torque_lhs);
-                        vec3_cross(&contact_offset_rhs, &c.n, &torque_rhs);
-
-                        // Assuming a simplified moment of inertia (I) as mass * radius^2 for spheres
-                        float I_lhs = (2.0f / 5.0f) * lhs->body.mass * lhs->radius * lhs->radius;
-                        float I_rhs = (2.0f / 5.0f) * rhs->body.mass * rhs->radius * rhs->radius;
-
-                        // Change in angular velocity due to torque = torque / moment of inertia
-                        float Il = 1.0f / I_lhs;
-                        float Ir = 1.0f / I_rhs;
-
-                        if (I_lhs > 0) {
-                            float angular_change_lhs = vec3_dot(&torque_lhs, &c.n) * Il;
-                            lhs->body.a_vel.xyz[0] += angular_change_lhs * torque_lhs.xyz[0];
-                            lhs->body.a_vel.xyz[1] += angular_change_lhs * torque_lhs.xyz[1];
-                            lhs->body.a_vel.xyz[2] += angular_change_lhs * torque_lhs.xyz[2];
-                        }
-
-                        if (I_rhs > 0) {
-                            float angular_change_rhs = vec3_dot(&torque_rhs, &c.n) * Ir;
-                            rhs->body.a_vel.xyz[0] += angular_change_rhs * torque_rhs.xyz[0];
-                            rhs->body.a_vel.xyz[1] += angular_change_rhs * torque_rhs.xyz[1];
-                            rhs->body.a_vel.xyz[2] += angular_change_rhs * torque_rhs.xyz[2];
-                        }
+                        vec3_add(&lhs->body.vel, &dv_lhs, &lhs->body.vel);   // v_lhs ← v_lhs + Δv
+                        vec3_sub(&rhs->body.vel, &dv_rhs, &rhs->body.vel);   // v_rhs ← v_rhs + Δv
                     }
                 }
             }
@@ -807,22 +766,24 @@ void physics_step(float t) {
                         float vel_along_normal = vec3_dot(&lhs->body.vel, &c.n);
                         if (vel_along_normal < 0) {
                             // Apply restitution
-                            Vec3 penetration, tangent;
-                            vec3_scale(&c.n, vel_along_normal, &penetration);
-                            vec3_sub(&lhs->body.vel, &penetration, &tangent);
+                            Vec3 vel_normal, vel_tangent;
+                            vec3_scale(&c.n, vel_along_normal, &vel_normal);
+                            vec3_sub(&lhs->body.vel, &vel_normal, &vel_tangent);
 
-                            float r = fmax(0 /*tri->bounce*/, lhs->body.bounce);
+                            float r = 1.0f + fmax(0 /*tri->bounce*/, lhs->body.bounce);
                             float f = fmin(tri->friction, lhs->body.friction);
 
-                            Vec3 impulse, tv;
-                            vec3_scale(&penetration, r, &impulse);
-                            vec3_scale(&tangent, f, &tv);
-                            vec3_add(&impulse, &tv, &impulse);
-                            vec3_sub(&lhs->body.vel, &impulse, &lhs->body.vel);
+                            Vec3 impulse, friction_impulse;
+
+                            vec3_scale(&vel_normal, -r, &impulse);
+                            vec3_scale(&vel_tangent, -f, &friction_impulse);
+                            vec3_add(&impulse, &friction_impulse, &impulse);
+                            vec3_add(&lhs->body.vel, &impulse, &lhs->body.vel);
 
                             Vec3 contact_offset;
                             vec3_sub(&c.p, &lhs->body.pos, &contact_offset);
 
+                            // Calculate the contact impulse
                             Vec3 contact_impulse;
                             vec3_scale(&impulse, -1.0f, &contact_impulse);
 
@@ -830,13 +791,21 @@ void physics_step(float t) {
                             Vec3 torque;
                             vec3_cross(&contact_offset, &contact_impulse, &torque);
 
-                            // Assuming a simplified moment of inertia (I) as mass * radius^2 for the sphere
+                            // Assuming a simplified moment of inertia (I) as (2/5) * mass * radius^2 for the sphere
                             float I = (2.0f / 5.0f) * lhs->body.mass * lhs->radius * lhs->radius;
 
                             // Change in angular velocity due to torque = torque / moment of inertia
-                            lhs->body.a_vel.xyz[0] += (torque.xyz[0] / I) * t;
-                            lhs->body.a_vel.xyz[1] += (torque.xyz[1] / I) * t;
-                            lhs->body.a_vel.xyz[2] += (torque.xyz[2] / I) * t;
+                            Vec3 angular_acceleration;
+                            vec3_scale(&torque, 1.0f / I, &angular_acceleration);
+
+                            // Update the angular velocity
+                            vec3_scale(&angular_acceleration, t, &angular_acceleration); // Scale by time step
+                            vec3_add(&lhs->body.a_vel, &angular_acceleration, &lhs->body.a_vel);
+
+                            // float rolling_friction = 0.3f;
+                            // Vec3 rolling_friction_force;
+                            // vec3_scale(&lhs->body.a_vel, -rolling_friction * t, &rolling_friction_force);
+                            // vec3_add(&lhs->body.a_vel, &rolling_friction_force, &lhs->body.a_vel);
                         }
                     }
                 }
