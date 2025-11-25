@@ -138,6 +138,16 @@ bool ground_check(const void *lhs, const void *rhs, BodyKind k0, BodyKind k1)
     return true;
 }
 
+void rotate_to_direction(Sphere *sphere, const Vec3 *target_forward, float dt)
+{
+    Vec3 forward;
+    vec3_set(&forward, 0, 0, -1);
+
+    Quaternion rotation;
+    quat_between(&forward, target_forward, &rotation);
+    quat_slerp(&sphere->body.rot, &rotation, dt, &sphere->body.rot);
+}
+
 void GameScene::on_load() {
     collision_map_add(CAR_BODY_KIND, CAR_INNER_KIND, &dont_collide);
     collision_map_add(CAR_INNER_KIND, BALL_KIND, &dont_collide);
@@ -174,6 +184,7 @@ void GameScene::on_load() {
     cars_[0].body_actor = create_child<smlt::Actor>(car_mesh2);
 
     sphere_set_bounce(ball_.body, 0.9f);
+    sphere_set_damping(ball_.body, 0.001f);
     sphere_set_bounce(cars_[0].body, 0.1f);
     sphere_set_bounce(cars_[0].shell, 0.1f);
 
@@ -262,27 +273,35 @@ void GameScene::on_update(float dt) {
     ball_.actor->transform->set_orientation(
         smlt::Quaternion(q.xyzw[0], q.xyzw[1], q.xyzw[2], q.xyzw[3]));
 
-    sphere_add_angular_force(cars_[0].body, 0, -10.0f * input->axis_value("Horizontal"), 0);
+    Vec3 drive_force;
+    vec3_set(&drive_force, -input->axis_value("Horizontal"), 0.0f, input->axis_value("Vertical"));
+    vec3_normalize(&drive_force);
+
+    float thrust = vec3_length(&drive_force);
+
+    if (fabs(thrust) > 0.0001f) {
+        rotate_to_direction(cars_[0].body, &drive_force, 5.0f * dt);
+    }
 
     Vec3 f;
     sphere_get_forward(cars_[0].body, &f);
 
     bool grounded = (bool) sphere_get_user_data(cars_[0].shell);
     if (grounded) {
-        vec3_scale(&f, 10.0f * input->axis_value("Vertical"), &f);
+        vec3_scale(&f, thrust * 10.0f, &f);
         sphere_add_force(cars_[0].shell, f.xyz[0], f.xyz[1], f.xyz[2]);
 
         if (input->axis_was_pressed("Fire1") && grounded) {
             sphere_add_force(cars_[0].shell, 0, 100.0f, 0);
         }
     } else {
-        vec3_scale(&f, 0.5f * input->axis_value("Vertical"), &f);
+        vec3_scale(&f, thrust * 0.5f, &f);
         sphere_add_force(cars_[0].shell, f.xyz[0], f.xyz[1], f.xyz[2]);
     }
 
     camera_->transform->look_at(cars_[0].body_actor->transform->position(), smlt::Vec3::up());
-    // camera_->transform->set_position(cars_[0].body_actor->transform->position()
-    //                                  + smlt::Vec3(0, 20, 0));
+    camera_->transform->set_position(cars_[0].body_actor->transform->position()
+                                     + smlt::Vec3(0, 15, 10));
 }
 
 void GameScene::on_activate() {

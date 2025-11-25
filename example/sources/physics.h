@@ -91,6 +91,9 @@ extern Vec3* vec3_init(Vec3* v);
 extern Vec3* vec3_set(Vec3* v, float x, float y, float z);
 extern Vec3* vec3_scale(const Vec3* v1, float t, Vec3* out);
 
+extern void quat_between(const Vec3* v0, const Vec3* q1, Quaternion* result);
+extern void quat_slerp(const Quaternion* q0, const Quaternion* q1, float t, Quaternion* result);
+
 extern void physics_step(float t);
 
 extern Triangle* physics_create_triangle(const Vec3* v1, const Vec3* v2, const Vec3* v3, BodyKind kind);
@@ -293,6 +296,86 @@ static void quat_forward(const Quaternion* q, Vec3* out)
     out->xyz[0] = 2.0f * (x * z + w * y);
     out->xyz[1] = 2.0f * (y * z - w * x);
     out->xyz[2] = 1.0f - 2.0f * (x * x + y * y);
+}
+
+void quat_between(const Vec3* v0, const Vec3* v1, Quaternion* result) {
+    float dot = vec3_dot(v0, v1);
+
+    // If the vectors are exactly opposite, return a 180-degree rotation around an arbitrary axis
+    if (dot < -1.0f + 1e-6f) {
+        // Rotate around the Y axis
+        result->xyzw[0] = 0.0f;
+        result->xyzw[1] = 1.0f;
+        result->xyzw[2] = 0.0f;
+        result->xyzw[3] = 0.0f;
+        return;
+    }
+
+    // If the vectors are exactly the same, return the identity quaternion
+    if (dot > 1.0f - 1e-6f) {
+        result->xyzw[0] = 0.0f;
+        result->xyzw[1] = 0.0f;
+        result->xyzw[2] = 0.0f;
+        result->xyzw[3] = 1.0f;
+        return;
+    }
+
+    // Calculate the axis of rotation
+    Vec3 axis;
+    axis.xyz[0] = v0->xyz[1] * v1->xyz[2] - v0->xyz[2] * v1->xyz[1];
+    axis.xyz[1] = v0->xyz[2] * v1->xyz[0] - v0->xyz[0] * v1->xyz[2];
+    axis.xyz[2] = v0->xyz[0] * v1->xyz[1] - v0->xyz[1] * v1->xyz[0];
+
+    vec3_normalize(&axis);
+
+    // Calculate the angle of rotation
+    float angle = acosf(dot);
+
+    // Calculate the quaternion
+    float half_angle = angle * 0.5f;
+    float sin_half_angle = sinf(half_angle);
+    result->xyzw[0] = axis.xyz[0] * sin_half_angle;
+    result->xyzw[1] = axis.xyz[1] * sin_half_angle;
+    result->xyzw[2] = axis.xyz[2] * sin_half_angle;
+    result->xyzw[3] = cosf(half_angle);
+}
+
+void quat_slerp(const Quaternion* q0, const Quaternion* q1, float t, Quaternion* result) {
+    float dot = q0->xyzw[0] * q1->xyzw[0] + q0->xyzw[1] * q1->xyzw[1] + q0->xyzw[2] * q1->xyzw[2] + q0->xyzw[3] * q1->xyzw[3];
+
+    Quaternion q1_temp;
+    if (dot < 0.0f) {
+        q1_temp.xyzw[0] = -q1->xyzw[0];
+        q1_temp.xyzw[1] = -q1->xyzw[1];
+        q1_temp.xyzw[2] = -q1->xyzw[2];
+        q1_temp.xyzw[3] = -q1->xyzw[3];
+        dot = -dot;
+    } else {
+        q1_temp = *q1;
+    }
+
+    // If the quaternions are very close, use linear interpolation
+    if (dot > 0.9995f) {
+        result->xyzw[0] = q0->xyzw[0] + t * (q1_temp.xyzw[0] - q0->xyzw[0]);
+        result->xyzw[1] = q0->xyzw[1] + t * (q1_temp.xyzw[1] - q0->xyzw[1]);
+        result->xyzw[2] = q0->xyzw[2] + t * (q1_temp.xyzw[2] - q0->xyzw[2]);
+        result->xyzw[3] = q0->xyzw[3] + t * (q1_temp.xyzw[3] - q0->xyzw[3]);
+        return;
+    }
+
+    // Calculate the angle between the quaternions
+    float theta = acosf(dot);
+
+    // Calculate the coefficients for spherical linear interpolation
+    float sin_theta = sinf(theta);
+    float s0 = sinf((1.0f - t) * theta) / sin_theta;
+    float s1 = sinf(t * theta) / sin_theta;
+
+    // Perform the interpolation
+    result->xyzw[0] = s0 * q0->xyzw[0] + s1 * q1_temp.xyzw[0];
+    result->xyzw[1] = s0 * q0->xyzw[1] + s1 * q1_temp.xyzw[1];
+    result->xyzw[2] = s0 * q0->xyzw[2] + s1 * q1_temp.xyzw[2];
+    result->xyzw[3] = s0 * q0->xyzw[3] + s1 * q1_temp.xyzw[3];
 }
 
 Vec3* tri_intersect(const Triangle* tri, const Vec3* o, const Vec3* d, Vec3* out) {
