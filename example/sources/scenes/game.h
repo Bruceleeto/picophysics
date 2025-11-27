@@ -6,8 +6,8 @@
 
 
 typedef struct _Car {
-    Sphere* body;
-    Sphere *shell;
+    PPSphere *body;
+    PPSphere *shell;
 
     smlt::ActorPtr body_actor;
     smlt::ActorPtr shell_actor;
@@ -15,7 +15,7 @@ typedef struct _Car {
 
 typedef struct _Ball
 {
-    Sphere *body;
+    PPSphere *body;
     smlt::ActorPtr actor;
 } Ball;
 
