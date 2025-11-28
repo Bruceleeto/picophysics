@@ -79,7 +79,7 @@ int main(int argc, char* argv[]) {
     pp_vec3_set(&tri.v[1], 0, 0, 1);
     pp_vec3_set(&tri.v[2], 1, 0, -1);
 
-    CHECK(pp_tri_intersect(&tri, &origin, &dir, &ret), "Didn't intersect");
+    CHECK(pp_tri_intersect(&tri, &origin, &dir, &ret, NULL), "Didn't intersect");
 
     CHECK(ret.xyz[0] == 0.0f, "Unexpected value\n");
     CHECK(ret.xyz[1] == 0.0f, "Unexpected value\n");
@@ -87,7 +87,7 @@ int main(int argc, char* argv[]) {
 
     pp_vec3_set(&dir, 0, 1, 0);
 
-    CHECK(pp_tri_intersect(&tri, &origin, &dir, &ret) == NULL, "Unexpectedly intersected");
+    CHECK(pp_tri_intersect(&tri, &origin, &dir, &ret, NULL) == false, "Unexpectedly intersected");
 
     PPVec3 p1, p2;
     pp_vec3_set(&p1, -0.5f, 0.0f, 0.0f);
@@ -117,6 +117,14 @@ int main(int argc, char* argv[]) {
     pp_physics_step(1.0f / 60.0f);
 
     CHECK(lhs->body.pos.xyz[1] == 1.0f, "Body position didn't move");
+
+    PPTriangle* ct;
+    PPSphere* cs;
+    PPVec3 ro = (PPVec3){.xyz = {0, 5, 0}};
+    PPVec3 rd = (PPVec3){.xyz = {0, -1, 0}};
+    float dist;
+    CHECK(pp_physics_ray_intersect(&ro, &rd, &cs, &ct, &dist), "Ray didn't intersect");
+    CHECK(CLOSE(dist, 5.0f), "Unexpected intersection distance");
 
     return 0;
 }
