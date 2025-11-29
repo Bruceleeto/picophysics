@@ -126,5 +126,15 @@ int main(int argc, char* argv[]) {
     CHECK(pp_physics_ray_intersect(&ro, &rd, &cs, &ct, &dist), "Ray didn't intersect");
     CHECK(CLOSE(dist, 5.0f), "Unexpected intersection distance");
 
+    rhs = pp_physics_create_sphere(1.0f, &p2, 1, 0);
+
+    CHECK(pp_physics_sphere_count() == 2, "Incorrect sphere count");
+    CHECK(pp_physics_sphere_total_count() == 2, "Incorrect sphere count");
+    pp_physics_destroy_sphere(lhs);
+    CHECK(pp_physics_sphere_count() == 1, "Incorrect sphere count");
+    CHECK(pp_physics_sphere_total_count() == 2, "Incorrect sphere count");
+    lhs = pp_physics_create_sphere(1.0f, &p1, 1, 0);
+    CHECK(pp_physics_sphere_count() == 2, "Incorrect sphere count");
+    CHECK(pp_physics_sphere_total_count() == 2, "Incorrect sphere count");
     return 0;
 }
