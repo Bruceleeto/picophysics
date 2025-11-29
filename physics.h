@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -96,11 +97,15 @@ extern void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float 
 
 extern void pp_physics_step(float t);
 extern bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance);
+extern void pp_physics_clear();
 
 extern PPTriangle* pp_physics_create_triangle(const PPVec3* v1, const PPVec3* v2, const PPVec3* v3, BodyKind kind);
 extern size_t pp_physics_triangle_count();
 extern const PPTriangle* pp_physics_triangle_at(size_t i);
 
+extern size_t pp_physics_sphere_count();
+extern size_t pp_physics_sphere_total_count();
+extern const PPSphere* pp_physics_sphere_at(size_t i);
 extern PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, BodyKind kind);
 extern void pp_physics_destroy_sphere(PPSphere* s);
 extern void pp_physics_set_gravity(const PPVec3* v);
@@ -141,6 +146,7 @@ extern void pp_sphere_look_at(PPSphere* s, float x, float y, float z);
 
 static PPSphere spheres[PHYSICS_MAX_SPHERES];
 static int sphere_count = 0;
+static int dead_sphere_count = 0;
 
 static PPTriangle tris[PHYSICS_MAX_TRIANGLES];
 static int tri_count = 0;
@@ -395,11 +401,11 @@ bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, P
  */
 bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance) {
     float closest_dist = FLT_MAX;
-    PPTriangle* closest_tri = NULL;
-    PPSphere* closest_sphere = NULL;
+    const PPTriangle* closest_tri = NULL;
+    const PPSphere* closest_sphere = NULL;
 
     for(int i = 0; i < pp_physics_triangle_count(); ++i) {
-        PPTriangle* t = &tris[i];
+        const PPTriangle* t = pp_physics_triangle_at(i);
 
         PPVec3 hit;
         float dist;
@@ -411,8 +417,12 @@ bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPS
         }
     }
 
-    for(int i = 0; i < sphere_count; ++i) {
-        PPSphere* s = &spheres[i];
+    for(int i = 0; i < pp_physics_sphere_total_count(); ++i) {
+        const PPSphere* s = pp_physics_sphere_at(i);
+        if(!s->is_alive) {
+            continue;
+        }
+
         PPVec3 hit;
         float dist;
         if(pp_sphere_intersect(s, origin, direction, &hit, &dist)) {
@@ -424,8 +434,8 @@ bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPS
         }
     }
 
-    *sphere_hit = closest_sphere;
-    *tri_hit = closest_tri;
+    *sphere_hit = (PPSphere*) closest_sphere;
+    *tri_hit = (PPTriangle*) closest_tri;
     *distance = closest_dist;
     return true;
 }
@@ -746,7 +756,22 @@ static void pp_fill_collision_info_sphere_triangle(const PPSphere* lhs, const PP
 }
 
 PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, BodyKind kind) {
-    PPSphere* ret = &spheres[sphere_count++];
+    PPSphere* ret = NULL;
+
+    if(dead_sphere_count) {
+        for(int i = 0; i < sphere_count; ++i) {
+            if(!spheres[i].is_alive) {
+                dead_sphere_count--;
+                ret = spheres + i;
+                break;
+            }
+        }
+    }
+
+    if(!ret) {
+        ret = &spheres[sphere_count++];
+    }
+
     pp_sphere_init(ret, radius, pos, mass, kind);
     return ret;
 }
@@ -770,8 +795,28 @@ PPTriangle* pp_physics_create_triangle(const PPVec3* v1, const PPVec3* v2, const
     return tri;
 }
 
+void pp_physics_clear() {
+    tri_count = 0;
+    sphere_count = 0;
+    dead_sphere_count = 0;
+    memset(tris, 0, sizeof(tris));
+    memset(spheres, 0, sizeof(spheres));
+}
+
 size_t pp_physics_triangle_count() {
     return tri_count;
+}
+
+size_t pp_physics_sphere_count() {
+    return sphere_count - dead_sphere_count;
+}
+
+size_t pp_physics_sphere_total_count() {
+    return sphere_count;
+}
+
+const PPSphere* pp_physics_sphere_at(size_t i) {
+    return spheres + i;
 }
 
 const PPTriangle* pp_physics_triangle_at(size_t i) {
@@ -780,6 +825,7 @@ const PPTriangle* pp_physics_triangle_at(size_t i) {
 
 void pp_physics_destroy_sphere(PPSphere* s) {
     s->is_alive = false;
+    ++dead_sphere_count;
 }
 
 void pp_physics_set_gravity(const PPVec3* v) {
