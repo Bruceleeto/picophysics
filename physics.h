@@ -427,6 +427,7 @@ bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPS
     *sphere_hit = closest_sphere;
     *tri_hit = closest_tri;
     *distance = closest_dist;
+    return true;
 }
 
 bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance) {
