@@ -128,13 +128,13 @@ int main(int argc, char* argv[]) {
 
     rhs = pp_physics_create_sphere(1.0f, &p2, 1, 0);
 
-    CHECK(pp_physics_sphere_count() == 2, "Incorrect sphere count");
-    CHECK(pp_physics_sphere_total_count() == 2, "Incorrect sphere count");
+    CHECK(pp_physics_body_count() == 2, "Incorrect sphere count");
+    CHECK(pp_physics_body_total_count() == 2, "Incorrect sphere count");
     pp_physics_destroy_sphere(lhs);
-    CHECK(pp_physics_sphere_count() == 1, "Incorrect sphere count");
-    CHECK(pp_physics_sphere_total_count() == 2, "Incorrect sphere count");
+    CHECK(pp_physics_body_count() == 1, "Incorrect sphere count");
+    CHECK(pp_physics_body_total_count() == 2, "Incorrect sphere count");
     lhs = pp_physics_create_sphere(1.0f, &p1, 1, 0);
-    CHECK(pp_physics_sphere_count() == 2, "Incorrect sphere count");
-    CHECK(pp_physics_sphere_total_count() == 2, "Incorrect sphere count");
+    CHECK(pp_physics_body_count() == 2, "Incorrect sphere count");
+    CHECK(pp_physics_body_total_count() == 2, "Incorrect sphere count");
     return 0;
 }
