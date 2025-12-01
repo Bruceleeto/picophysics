@@ -92,6 +92,8 @@ extern PPVec3* pp_vec3_init(PPVec3* v);
 extern PPVec3* pp_vec3_set(PPVec3* v, float x, float y, float z);
 extern PPVec3* pp_vec3_scale(const PPVec3* v1, float t, PPVec3* out);
 extern PPVec3* pp_vec3_assign(PPVec3* target, const PPVec3* source);
+extern bool pp_vec3_normalize(PPVec3* target);
+extern float pp_vec3_length(const PPVec3* v1);
 
 extern void pp_quat_between(const PPVec3* v0, const PPVec3* q1, PPQuaternion* result);
 extern void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQuaternion* result);
