@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -95,11 +96,16 @@ extern void pp_quat_between(const PPVec3* v0, const PPVec3* q1, PPQuaternion* re
 extern void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQuaternion* result);
 
 extern void pp_physics_step(float t);
+extern bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance);
+extern void pp_physics_clear();
 
 extern PPTriangle* pp_physics_create_triangle(const PPVec3* v1, const PPVec3* v2, const PPVec3* v3, BodyKind kind);
 extern size_t pp_physics_triangle_count();
 extern const PPTriangle* pp_physics_triangle_at(size_t i);
 
+extern size_t pp_physics_sphere_count();
+extern size_t pp_physics_sphere_total_count();
+extern const PPSphere* pp_physics_sphere_at(size_t i);
 extern PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, BodyKind kind);
 extern void pp_physics_destroy_sphere(PPSphere* s);
 extern void pp_physics_set_gravity(const PPVec3* v);
@@ -118,6 +124,12 @@ extern void pp_sphere_get_position(PPSphere* s, PPVec3* pos);
 extern float pp_sphere_get_radius(PPSphere* s);
 extern void pp_sphere_set_user_data(PPSphere* s, void* data);
 extern void* pp_sphere_get_user_data(const PPSphere* s);
+extern void pp_sphere_set_friction(PPSphere* s, float f);
+
+extern void pp_set_angular_velocity(PPSphere* s, float x, float y, float z);
+extern void pp_set_velocity(PPSphere* s, float x, float y, float z);
+extern void pp_set_angular_acceleration(PPSphere* s, float x, float y, float z);
+extern void pp_set_acceleration(PPSphere* s, float x, float y, float z);
 
 // Given a direction vector, this will apply a force to attempt to look towards it
 extern void pp_sphere_look_at(PPSphere* s, float x, float y, float z);
@@ -135,6 +147,7 @@ extern void pp_sphere_look_at(PPSphere* s, float x, float y, float z);
 
 static PPSphere spheres[PHYSICS_MAX_SPHERES];
 static int sphere_count = 0;
+static int dead_sphere_count = 0;
 
 static PPTriangle tris[PHYSICS_MAX_TRIANGLES];
 static int tri_count = 0;
@@ -378,8 +391,92 @@ void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQu
     result->xyzw[3] = s0 * q0->xyzw[3] + s1 * q1_temp.xyzw[3];
 }
 
-PPVec3* pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, PPVec3* out) {
+bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance);
+bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance);
 
+/**
+ * Intersects the world with the specified ray. Returns true if something was hit.
+ *
+ * If a hit was detected, then either sphere_hit or tri_hit will be populated (depending on what was hit) and the distance from the
+ * origin to the hit will be returned.
+ */
+bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance) {
+    float closest_dist = FLT_MAX;
+    const PPTriangle* closest_tri = NULL;
+    const PPSphere* closest_sphere = NULL;
+
+    for(int i = 0; i < pp_physics_triangle_count(); ++i) {
+        const PPTriangle* t = pp_physics_triangle_at(i);
+
+        PPVec3 hit;
+        float dist;
+        if(pp_tri_intersect(t, origin, direction, &hit, &dist)){
+            if(dist < closest_dist) {
+                closest_tri = t;
+                closest_dist = dist;
+            }
+        }
+    }
+
+    for(int i = 0; i < pp_physics_sphere_total_count(); ++i) {
+        const PPSphere* s = pp_physics_sphere_at(i);
+        if(!s->is_alive) {
+            continue;
+        }
+
+        PPVec3 hit;
+        float dist;
+        if(pp_sphere_intersect(s, origin, direction, &hit, &dist)) {
+            if(dist < closest_dist) {
+                closest_sphere = s;
+                closest_tri = NULL;
+                closest_dist = dist;
+            }
+        }
+    }
+
+    *sphere_hit = (PPSphere*) closest_sphere;
+    *tri_hit = (PPTriangle*) closest_tri;
+    *distance = closest_dist;
+    return true;
+}
+
+bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance) {
+    PPVec3 oc;
+    pp_vec3_sub(&sphere->body.pos, o, &oc);
+
+    float b = pp_vec3_dot(&oc, d);
+    float c = pp_vec3_dot(&oc, &oc) - sphere->radius * sphere->radius;
+
+    float discriminant = b * b - c;
+
+    // If the discriminant is negative, there are no real roots, so no intersection
+    if (discriminant < 0) {
+        return false;
+    }
+
+    // Calculate the two points of intersection
+    float sqrtDiscriminant = sqrtf(discriminant);
+    float t1 = -b - sqrtDiscriminant;
+    float t2 = -b + sqrtDiscriminant;
+
+    // Check if the points of intersection are in front of the ray origin
+    if (t1 > 0 && (t2 <= 0 || t1 < t2)) {
+        PPVec3 add;
+        pp_vec3_scale(d, t1, &add);
+        pp_vec3_add(o, &add, out);
+        return true;
+    } else if (t2 > 0) {
+        PPVec3 add;
+        pp_vec3_scale(d, t2, &add);
+        pp_vec3_add(o, &add, out);
+        return true;
+    }
+
+    return false;
+}
+
+bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance) {
     const float e = FLT_EPSILON;
     PPVec3 edge1, edge2, cross_e1, cross_e2, s;
     pp_vec3_sub(&tri->v[1], &tri->v[0], &edge1);
@@ -397,28 +494,49 @@ PPVec3* pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d
     float u = inv_det * pp_vec3_dot(&s, &cross_e2);
 
     if ((u < 0 && fabsf(u) > e) || (u > 1 && fabsf(u-1) > e)) {
-        return NULL;
+        return false;
     }
 
     pp_vec3_cross(&s, &edge1, &cross_e1);
     float v = inv_det * pp_vec3_dot(d, &cross_e1);
 
     if ((v < 0 && fabsf(v) > e) || (u + v > 1 && fabsf(u + v - 1) > e)) {
-        return NULL;
+        return false;
     }
 
     float t = inv_det * pp_vec3_dot(&edge2, &cross_e1);
 
     if(t <= e) {
-        return NULL;
+        return false;
     }
 
     pp_vec3_scale(d, t, out);
     pp_vec3_add(out, o, out);
-    return out;
+
+    if(distance) {
+        *distance = t;
+    }
+
+    return true;
 }
 
 PPSphere* pp_sphere_set_bounce(PPSphere* s, float b);
+
+void pp_set_angular_velocity(PPSphere* s, float x, float y, float z) {
+    pp_vec3_set(&s->body.a_vel, x, y, z);
+}
+
+void pp_set_velocity(PPSphere* s, float x, float y, float z) {
+    pp_vec3_set(&s->body.vel, x, y, z);
+}
+
+void pp_set_angular_acceleration(PPSphere* s, float x, float y, float z) {
+    pp_vec3_set(&s->body.a_acc, x, y, z);
+}
+
+void pp_set_acceleration(PPSphere* s, float x, float y, float z) {
+    pp_vec3_set(&s->body.acc, x, y, z);
+}
 
 void pp_sphere_set_angular_damping(PPSphere* s, float d) {
     if(d < 0.0f || d > 1.0f) {
@@ -552,6 +670,15 @@ void pp_sphere_set_position(PPSphere*s, float x, float y, float z) {
     pp_vec3_set(&s->body.pos, x, y, z);
 }
 
+void pp_sphere_set_friction(PPSphere* s, float f) {
+    if(f < 0.0f || f > 1.0f) {
+        return NULL;
+    }
+
+    s->body.friction = f;
+    return s;
+}
+
 PPSphere* pp_sphere_set_bounce(PPSphere* s, float b) {
     if(b < 0.0f || b > 1.0f) {
         return NULL;
@@ -639,7 +766,22 @@ static void pp_fill_collision_info_sphere_triangle(const PPSphere* lhs, const PP
 }
 
 PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, BodyKind kind) {
-    PPSphere* ret = &spheres[sphere_count++];
+    PPSphere* ret = NULL;
+
+    if(dead_sphere_count) {
+        for(int i = 0; i < sphere_count; ++i) {
+            if(!spheres[i].is_alive) {
+                dead_sphere_count--;
+                ret = spheres + i;
+                break;
+            }
+        }
+    }
+
+    if(!ret) {
+        ret = &spheres[sphere_count++];
+    }
+
     pp_sphere_init(ret, radius, pos, mass, kind);
     return ret;
 }
@@ -663,8 +805,28 @@ PPTriangle* pp_physics_create_triangle(const PPVec3* v1, const PPVec3* v2, const
     return tri;
 }
 
+void pp_physics_clear() {
+    tri_count = 0;
+    sphere_count = 0;
+    dead_sphere_count = 0;
+    memset(tris, 0, sizeof(tris));
+    memset(spheres, 0, sizeof(spheres));
+}
+
 size_t pp_physics_triangle_count() {
     return tri_count;
+}
+
+size_t pp_physics_sphere_count() {
+    return sphere_count - dead_sphere_count;
+}
+
+size_t pp_physics_sphere_total_count() {
+    return sphere_count;
+}
+
+const PPSphere* pp_physics_sphere_at(size_t i) {
+    return spheres + i;
 }
 
 const PPTriangle* pp_physics_triangle_at(size_t i) {
@@ -673,6 +835,7 @@ const PPTriangle* pp_physics_triangle_at(size_t i) {
 
 void pp_physics_destroy_sphere(PPSphere* s) {
     s->is_alive = false;
+    ++dead_sphere_count;
 }
 
 void pp_physics_set_gravity(const PPVec3* v) {
@@ -823,9 +986,8 @@ void pp_physics_step(float t) {
 
             PPVec3 p, d;
             pp_vec3_scale(&tri->n, -1.0f, &d);
-            if(pp_tri_intersect(tri, &lhs->body.pos, &d, &p)) {
-                float dist = pp_vec3_dist(&lhs->body.pos, &p);
-
+            float dist;
+            if(pp_tri_intersect(tri, &lhs->body.pos, &d, &p, &dist)) {
                 if(dist <= lhs->radius) {
                     PPCollision c;
                     pp_fill_collision_info_sphere_triangle(lhs, tri, &p, &c);
