@@ -91,9 +91,11 @@ typedef struct _PPTriangle {
 extern PPVec3* pp_vec3_init(PPVec3* v);
 extern PPVec3* pp_vec3_set(PPVec3* v, float x, float y, float z);
 extern PPVec3* pp_vec3_scale(const PPVec3* v1, float t, PPVec3* out);
+extern PPVec3* pp_vec3_assign(PPVec3* target, const PPVec3* source);
 
 extern void pp_quat_between(const PPVec3* v0, const PPVec3* q1, PPQuaternion* result);
 extern void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQuaternion* result);
+extern PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source);
 
 extern void pp_physics_step(float t);
 extern bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance);
@@ -121,6 +123,7 @@ extern void pp_sphere_set_damping(PPSphere* s, float d);
 extern void pp_sphere_get_forward(PPSphere* s, PPVec3* f);
 extern void pp_sphere_set_position(PPSphere* s, float x, float y, float z);
 extern void pp_sphere_get_position(PPSphere* s, PPVec3* pos);
+extern void pp_sphere_get_rotation(PPSphere* s, PPQuaternion* rot);
 extern float pp_sphere_get_radius(PPSphere* s);
 extern void pp_sphere_set_user_data(PPSphere* s, void* data);
 extern void* pp_sphere_get_user_data(const PPSphere* s);
@@ -255,6 +258,11 @@ PPQuaternion* pp_quat_set(PPQuaternion* q, float x, float y, float z, float w) {
     q->xyzw[2] = z;
     q->xyzw[3] = w;
     return q;
+}
+
+PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source) {
+    pp_quat_set(target, source->xyzw[0], source->xyzw[1], source->xyzw[2], source->xyzw[3]);
+    return target;
 }
 
 void pp_quat_from_angular_velocity(const PPVec3* a_vel, float dt, PPQuaternion* q_rot) {
@@ -664,6 +672,10 @@ void pp_sphere_lock_axis(PPSphere* s, PPAxisLock lock) {
 
 void pp_sphere_get_position(PPSphere*s, PPVec3* pos) {
     pp_vec3_assign(pos, &s->body.pos);
+}
+
+void pp_sphere_get_rotation(PPSphere* s, PPQuaternion* rot) {
+    pp_quat_assign(rot, &s->body.rot);
 }
 
 void pp_sphere_set_position(PPSphere*s, float x, float y, float z) {
