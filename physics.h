@@ -675,25 +675,35 @@ void pp_body_look_at(PPBody* s, float x, float y, float z) {
     pp_body_add_angular_force(s, torque.xyz[0], torque.xyz[1], torque.xyz[2]);
 }
 
+static void pp_body_init(PPBody* body, const PPVec3* pos, float mass, BodyKind kind) {
+    body->is_alive = true;
+    body->user_data = NULL;
+
+    pp_vec3_init(&body->vel);
+    pp_vec3_init(&body->acc);
+    pp_vec3_init(&body->a_vel);
+    pp_vec3_init(&body->a_acc);
+    pp_quat_init(&body->rot);
+    pp_vec3_set(&body->pos, pos->xyz[0], pos->xyz[1], pos->xyz[2]);
+    body->kind = kind;
+    body->mass = mass;
+    body->friction = 0.3f;
+    body->damping = 0.01f;
+    body->a_damping = 0.02f;
+    pp_body_set_bounce(body, 0.5f);
+}
+
 PPSphere* pp_sphere_init(PPSphere* s, float radius, const PPVec3* pos, float mass, BodyKind kind) {
     s->radius = radius;
     s->body.type = PP_OBJECT_TYPE_SPHERE;
-    s->body.is_alive = true;
-    s->body.user_data = NULL;
-
-    pp_vec3_init(&s->body.vel);
-    pp_vec3_init(&s->body.acc);
-    pp_vec3_init(&s->body.a_vel);
-    pp_vec3_init(&s->body.a_acc);
-    pp_quat_init(&s->body.rot);
-    pp_vec3_set(&s->body.pos, pos->xyz[0], pos->xyz[1], pos->xyz[2]);
-    s->body.kind = kind;
-    s->body.mass = mass;
     s->body.inertia = (2.0f / 5.0f) * mass * radius * radius;
-    s->body.friction = 0.3f;
-    s->body.damping = 0.01f;
-    s->body.a_damping = 0.02f;
-    pp_body_set_bounce(PP_BODY(s), 0.5f);
+    pp_body_init(&s->body, pos, mass, kind);
+    return s;
+}
+
+PPBox* pp_box_init(PPBox* s, float width, float height, float depth, const PPVec3* pos, float mass, BodyKind kind) {
+    s->body.type = PP_OBJECT_TYPE_BOX;
+    pp_body_init(&s->body, pos, mass, kind);
     return s;
 }
 
@@ -834,6 +844,31 @@ PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, 
     pp_sphere_init(ret, radius, pos, mass, kind);
     return ret;
 }
+
+PPBox* pp_physics_create_box(float width, float height, float depth, const PPVec3* pos, float mass, BodyKind kind) {
+    PPBox* ret = NULL;
+
+    if(dead_object_count) {
+        for(int i = 0; i < object_count; ++i) {
+            PPBody* body = (PPBody*) &objects[i];
+            if(!body->is_alive) {
+                dead_object_count--;
+                ret = &objects[i].b;
+                break;
+            }
+        }
+    }
+
+    if(!ret) {
+        PPObject* obj = &objects[object_count++];
+        ret = (PPBox*) &obj->b;
+        assert(ret);
+    }
+
+    pp_box_init(ret, width, height, depth, pos, mass, kind);
+    return ret;
+}
+
 
 PPTriangle* pp_physics_create_triangle(const PPVec3* v1, const PPVec3* v2, const PPVec3* v3, BodyKind kind) {
     PPTriangle* tri = &tris[tri_count++];
