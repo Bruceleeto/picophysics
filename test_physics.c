@@ -102,7 +102,7 @@ int main(int argc, char* argv[]) {
     CHECK(rhs->body.pos.xyz[0] == 1.0f, "Unexpected position\n");
 
     pp_physics_destroy_sphere(rhs);
-    CHECK(rhs->is_alive == false, "Sphere unexpectedly alive\n");
+    CHECK(rhs->body.is_alive == false, "Sphere unexpectedly alive\n");
 
     PPVec3 v3;
 
