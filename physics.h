@@ -124,6 +124,7 @@ extern void pp_sphere_get_position(PPSphere* s, PPVec3* pos);
 extern float pp_sphere_get_radius(PPSphere* s);
 extern void pp_sphere_set_user_data(PPSphere* s, void* data);
 extern void* pp_sphere_get_user_data(const PPSphere* s);
+extern void pp_sphere_set_friction(PPSphere* s, float f);
 
 extern void pp_set_angular_velocity(PPSphere* s, float x, float y, float z);
 extern void pp_set_velocity(PPSphere* s, float x, float y, float z);
@@ -667,6 +668,15 @@ void pp_sphere_get_position(PPSphere*s, PPVec3* pos) {
 
 void pp_sphere_set_position(PPSphere*s, float x, float y, float z) {
     pp_vec3_set(&s->body.pos, x, y, z);
+}
+
+void pp_sphere_set_friction(PPSphere* s, float f) {
+    if(f < 0.0f || f > 1.0f) {
+        return NULL;
+    }
+
+    s->body.friction = f;
+    return s;
 }
 
 PPSphere* pp_sphere_set_bounce(PPSphere* s, float b) {
