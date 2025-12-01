@@ -520,7 +520,7 @@ bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, P
     return true;
 }
 
-PPSphere* pp_sphere_set_bounce(PPSphere* s, float b);
+bool pp_sphere_set_bounce(PPSphere* s, float b);
 
 void pp_set_angular_velocity(PPSphere* s, float x, float y, float z) {
     pp_vec3_set(&s->body.a_vel, x, y, z);

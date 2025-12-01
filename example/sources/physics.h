@@ -112,7 +112,7 @@ extern void pp_physics_set_gravity(const PPVec3* v);
 
 extern bool pp_collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind));
 
-extern PPSphere* pp_sphere_set_bounce(PPSphere* s, float b);
+extern bool pp_sphere_set_bounce(PPSphere* s, float b);
 extern void pp_sphere_add_force(PPSphere* s, float x, float y, float z);
 extern void pp_sphere_add_angular_force(PPSphere* s, float x, float y, float z);
 extern void pp_sphere_lock_axis(PPSphere* s, PPAxisLock lock);
@@ -124,7 +124,7 @@ extern void pp_sphere_get_position(PPSphere* s, PPVec3* pos);
 extern float pp_sphere_get_radius(PPSphere* s);
 extern void pp_sphere_set_user_data(PPSphere* s, void* data);
 extern void* pp_sphere_get_user_data(const PPSphere* s);
-extern void pp_sphere_set_friction(PPSphere* s, float f);
+extern bool pp_sphere_set_friction(PPSphere* s, float f);
 
 extern void pp_set_angular_velocity(PPSphere* s, float x, float y, float z);
 extern void pp_set_velocity(PPSphere* s, float x, float y, float z);
@@ -670,22 +670,22 @@ void pp_sphere_set_position(PPSphere*s, float x, float y, float z) {
     pp_vec3_set(&s->body.pos, x, y, z);
 }
 
-void pp_sphere_set_friction(PPSphere* s, float f) {
-    if(f < 0.0f || f > 1.0f) {
-        return NULL;
+bool pp_sphere_set_friction(PPSphere* s, float f) {
+    if(!s || f < 0.0f || f > 1.0f) {
+        return false;
     }
 
     s->body.friction = f;
-    return s;
+    return true;
 }
 
-PPSphere* pp_sphere_set_bounce(PPSphere* s, float b) {
-    if(b < 0.0f || b > 1.0f) {
-        return NULL;
+bool pp_sphere_set_bounce(PPSphere* s, float b) {
+    if(!s || b < 0.0f || b > 1.0f) {
+        return false;
     }
 
     s->body.bounce = b;
-    return s;
+    return true;
 }
 
 void pp_sphere_add_force(PPSphere* s, float x, float y, float z) {
