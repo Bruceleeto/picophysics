@@ -95,6 +95,7 @@ extern PPVec3* pp_vec3_assign(PPVec3* target, const PPVec3* source);
 extern bool pp_vec3_normalize(PPVec3* target);
 extern float pp_vec3_length(const PPVec3* v1);
 
+extern PPQuaternion* pp_quat_init(PPQuaternion* q);
 extern void pp_quat_between(const PPVec3* v0, const PPVec3* q1, PPQuaternion* result);
 extern void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQuaternion* result);
 extern PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source);
@@ -125,11 +126,13 @@ extern void pp_sphere_set_damping(PPSphere* s, float d);
 extern void pp_sphere_get_forward(PPSphere* s, PPVec3* f);
 extern void pp_sphere_set_position(PPSphere* s, float x, float y, float z);
 extern void pp_sphere_get_position(PPSphere* s, PPVec3* pos);
+void pp_sphere_set_rotation(PPSphere* s, float x, float y, float z, float w);
 extern void pp_sphere_get_rotation(PPSphere* s, PPQuaternion* rot);
 extern float pp_sphere_get_radius(PPSphere* s);
 extern void pp_sphere_set_user_data(PPSphere* s, void* data);
 extern void* pp_sphere_get_user_data(const PPSphere* s);
 extern bool pp_sphere_set_friction(PPSphere* s, float f);
+extern void pp_sphere_get_velocity(const PPSphere* s, PPVec3* vel);
 
 extern void pp_set_angular_velocity(PPSphere* s, float x, float y, float z);
 extern void pp_set_velocity(PPSphere* s, float x, float y, float z);
@@ -460,6 +463,11 @@ bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* 
 
     float discriminant = b * b - c;
 
+    // No matter what, always init the distance
+    if(distance) {
+        *distance = FLT_MAX;
+    }
+
     // If the discriminant is negative, there are no real roots, so no intersection
     if (discriminant < 0) {
         return false;
@@ -676,12 +684,20 @@ void pp_sphere_get_position(PPSphere*s, PPVec3* pos) {
     pp_vec3_assign(pos, &s->body.pos);
 }
 
+void pp_sphere_get_velocity(const PPSphere* s, PPVec3* vel) {
+    pp_vec3_assign(vel, &s->body.vel);
+}
+
 void pp_sphere_get_rotation(PPSphere* s, PPQuaternion* rot) {
     pp_quat_assign(rot, &s->body.rot);
 }
 
 void pp_sphere_set_position(PPSphere*s, float x, float y, float z) {
     pp_vec3_set(&s->body.pos, x, y, z);
+}
+
+void pp_sphere_set_rotation(PPSphere* s, float x, float y, float z, float w) {
+    pp_quat_set(&s->body.rot, x, y, z, w);
 }
 
 bool pp_sphere_set_friction(PPSphere* s, float f) {
@@ -794,6 +810,7 @@ PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, 
 
     if(!ret) {
         ret = &spheres[sphere_count++];
+        assert(ret);
     }
 
     pp_sphere_init(ret, radius, pos, mass, kind);
