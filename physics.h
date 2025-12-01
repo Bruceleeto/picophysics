@@ -57,7 +57,14 @@ typedef enum _PPAxisLock {
     PP_AXIS_LOCK_ALL = PP_AXIS_LOCK_PITCH | PP_AXIS_LOCK_YAW | PP_AXIS_LOCK_ROLL
 } PPAxisLock;
 
+enum PPObjectType {
+    PP_OBJECT_TYPE_SPHERE,
+    PP_OBJECT_TYPE_BOX,
+};
+
 typedef struct _PPBody {
+    PPObjectType type;
+
     PPVec3 pos;
     float bounce;
     PPQuaternion rot;
@@ -101,6 +108,8 @@ typedef struct _PPTriangle {
 } PPTriangle;
 
 #define PP_BODY(p) ((PPBody*) &p)
+#define PP_SPHERE(p) ((p->type == PP_OBJECT_TYPE_SPHERE) ? (PPSphere*) p : NULL));
+#define PP_BOX(p) ((p->type == PP_OBJECT_TYPE_BOX) ? (PPBox*) p : NULL));
 
 PPVec3* pp_vec3_init(PPVec3* v);
 PPVec3* pp_vec3_set(PPVec3* v, float x, float y, float z);
@@ -663,6 +672,7 @@ void pp_body_look_at(PPBody* s, float x, float y, float z) {
 
 PPSphere* pp_sphere_init(PPSphere* s, float radius, const PPVec3* pos, float mass, BodyKind kind) {
     s->radius = radius;
+    s->body.type = PP_OBJPP_OBJECT_TYPE_SPHERE;
     s->body.is_alive = true;
     s->body.user_data = NULL;
 

@@ -15,7 +15,12 @@ extern "C" {
 #endif
 
 typedef struct _PPVec3 {
-    float xyz[3];
+    union {
+        struct {
+            float x, y, z;
+        };
+        float xyz[3];
+    };
 } PPVec3;
 
 typedef struct _PPQuaternion {
