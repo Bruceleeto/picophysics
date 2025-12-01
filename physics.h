@@ -177,12 +177,17 @@ void pp_body_look_at(PPBody* s, float x, float y, float z);
 
 #ifdef PHYSICS_IMPLEMENTATION
 
-#define PHYSICS_MAX_SPHERES 32
+#define PHYSICS_MAX_OBJECTS 32
 #define PHYSICS_MAX_TRIANGLES 128
 
-static PPSphere spheres[PHYSICS_MAX_SPHERES];
-static int sphere_count = 0;
-static int dead_sphere_count = 0;
+union _PPObject {
+    PPSphere s;
+    PPBox b;
+} PPObject;
+
+static PPObject objects[PHYSICS_MAX_OBJECTS];
+static int object_count = 0;
+static int dead_object_count = 0;
 
 static PPTriangle tris[PHYSICS_MAX_TRIANGLES];
 static int tri_count = 0;
@@ -808,23 +813,23 @@ void pp_fill_collision_info_sphere_triangle(const PPSphere* lhs, const PPTriangl
 PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, BodyKind kind) {
     PPSphere* ret = NULL;
 
-    if(dead_sphere_count) {
-        for(int i = 0; i < sphere_count; ++i) {
-            if(!spheres[i].body.is_alive) {
-                dead_sphere_count--;
-                ret = spheres + i;
+    if(dead_object_count) {
+        for(int i = 0; i < object_count; ++i) {
+            if(!objects[i].body.is_alive) {
+                dead_object_count--;
+                ret = objects + i;
                 break;
             }
         }
     }
 
     if(!ret) {
-        ret = &spheres[sphere_count++];
+        ret = &objects[object_count++];
         assert(ret);
     }
 
-    pp_sphere_init(ret, radius, pos, mass, kind);
-    return ret;
+    pp_sphere_init(&ret->s, radius, pos, mass, kind);
+    return &ret->s;
 }
 
 PPTriangle* pp_physics_create_triangle(const PPVec3* v1, const PPVec3* v2, const PPVec3* v3, BodyKind kind) {
