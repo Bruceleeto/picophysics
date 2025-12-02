@@ -23,6 +23,10 @@ typedef struct _PPQuaternion {
     float xyzw[4];;
 } PPQuaternion;
 
+typedef struct _PPMat3 {
+    float m[9];
+} PPMat3;
+
 typedef struct _PPPlane {
     PPVec3 n;
     float d;
@@ -75,7 +79,7 @@ typedef struct _PPBody {
 
     float mass;
     float friction;
-    float inertia;
+    PPMat3 inertia;
 
     BodyKind kind;
 
@@ -696,13 +700,31 @@ static void pp_body_init(PPBody* body, const PPVec3* pos, float mass, BodyKind k
 PPSphere* pp_sphere_init(PPSphere* s, float radius, const PPVec3* pos, float mass, BodyKind kind) {
     s->radius = radius;
     s->body.type = PP_OBJECT_TYPE_SPHERE;
-    s->body.inertia = (2.0f / 5.0f) * mass * radius * radius;
+    s->body.inertia[0] = (2.0f / 5.0f) * mass * radius * radius;
     pp_body_init(&s->body, pos, mass, kind);
     return s;
 }
 
 PPBox* pp_box_init(PPBox* s, float width, float height, float depth, const PPVec3* pos, float mass, BodyKind kind) {
     s->body.type = PP_OBJECT_TYPE_BOX;
+
+    float w2 = width * width;
+    float h2 = height * height;
+    float d2 = depth * depth;
+    const float oot = 1.0f / 12.0f;
+
+    s->body.inertia = {
+        oot * mass * (h2 + w2),
+        0.0f,
+        0.0f,
+        0.0f,
+        oot * mass * (d2 + h2),
+        0.0f,
+        0.0f,
+        0.0f,
+        oot * mass * (d2 + w2),
+    };
+
     pp_body_init(&s->body, pos, mass, kind);
     return s;
 }
@@ -765,13 +787,16 @@ void pp_body_add_angular_force(PPBody* s, float tx, float ty, float tz)
     PPVec3 torque;
     pp_vec3_set(&torque, tx, ty, tz);
 
-    float I = s->inertia;
+    if(PP_SPHERE(s)) {
+        // Simplified inertia for Spheres
+        float I = s->inertia[0];
 
-    if (I <= 0.0f) return;   // nothing to do for mass‑less or zero‑radius objects
+        if (I <= 0.0f) return;   // nothing to do for mass‑less or zero‑radius objects
 
-    PPVec3 ang_acc;
-    pp_vec3_scale(&torque, 1.0f / I, &ang_acc);
-    pp_vec3_add(&s->a_acc, &ang_acc, &s->a_acc);
+        PPVec3 ang_acc;
+        pp_vec3_scale(&torque, 1.0f / I, &ang_acc);
+        pp_vec3_add(&s->a_acc, &ang_acc, &s->a_acc);
+    }
 }
 
 const struct _PPCollisionMapEntry* pp_physics_collision_map_search(BodyKind kind1, BodyKind kind2) {
@@ -1125,7 +1150,7 @@ void pp_physics_step(float t) {
                             pp_vec3_cross(&contact_offset, &contact_impulse, &torque);
 
                             // Assuming a simplified moment of inertia (I) as (2/5) * mass * radius^2 for the sphere
-                            float I = (2.0f / 5.0f) * lhs->body.mass * lhs->radius * lhs->radius;
+                            float I = lhs->body.inertia[0];
 
                             // Change in angular velocity due to torque = torque / moment of inertia
                             PPVec3 angular_acceleration;
