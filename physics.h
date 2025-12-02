@@ -99,7 +99,7 @@ typedef struct _PPSphere {
 
 typedef struct _PPBox {
     PPBody body;
-    PPVec3 extents;
+    PPVec3 axis[3];
 } PPBox;
 
 typedef struct _PPTriangle {
@@ -721,6 +721,10 @@ PPBox* pp_box_init(PPBox* s, float width, float height, float depth, const PPVec
     s->body.inertia.m[8] = oot * mass * (d2 + w2);
 
     pp_body_init(&s->body, pos, mass, kind);
+
+    pp_vec3_set(&s->axis[0], width, 0, 0);
+    pp_vec3_set(&s->axis[1], 0, height, 0);
+    pp_vec3_set(&s->axis[2], 0, 0, depth);
     return s;
 }
 
