@@ -835,9 +835,10 @@ void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* r
     }
 }
 
-void pp_fill_collision_info_sphere_triangle(const PPSphere* lhs, const PPTriangle* tri, const PPVec3* p, PPCollision* c) {
+void pp_fill_collision_info_sphere_triangle(const PPSphere* lhs, const PPTriangle* tri, const PPVec3* p, float dist, PPCollision* c) {
     pp_vec3_scale(&tri->n, 1.0f, &c->n); // Copy
     pp_vec3_scale(p, 1.0f, &c->p); // Copy
+    c->dist = dist;
 }
 
 PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, BodyKind kind) {
@@ -944,6 +945,62 @@ void pp_physics_destroy_sphere(PPSphere* s) {
 void pp_physics_set_gravity(const PPVec3* v) {
     pp_vec3_assign(&gravity, v);
     gravity_magnitude = pp_vec3_length(&gravity);
+}
+
+static void pp_sphere_triangle_response(PPSphere* lhs_sphere, const PPTriangle* tri, const PPCollision* c, float t) {
+    PPBody* lhs_body = PP_BODY(lhs_sphere);
+    float overlap = lhs_sphere->radius - c->dist;
+
+    // Move the sphere out of overlap immediately
+    PPVec3 adjustment;
+    pp_vec3_scale(&c->n, overlap, &adjustment);
+    pp_vec3_add(&lhs_body->pos, &adjustment, &lhs_body->pos);
+
+    // Reflect the velocity based on the collision normal
+    float vel_along_normal = pp_vec3_dot(&lhs_body->vel, &c->n);
+    if (vel_along_normal < 0) {
+        // Apply restitution
+        PPVec3 vel_normal, vel_tangent;
+        pp_vec3_scale(&c->n, vel_along_normal, &vel_normal);
+        pp_vec3_sub(&lhs_body->vel, &vel_normal, &vel_tangent);
+
+        float r = 1.0f + fmax(0 /*tri->bounce*/, lhs_body->bounce);
+        float f = fmin(tri->friction, lhs_body->friction);
+
+        PPVec3 impulse, friction_impulse;
+
+        pp_vec3_scale(&vel_normal, -r, &impulse);
+        pp_vec3_scale(&vel_tangent, -f, &friction_impulse);
+        pp_vec3_add(&impulse, &friction_impulse, &impulse);
+        pp_vec3_add(&lhs_body->vel, &impulse, &lhs_body->vel);
+
+        PPVec3 contact_offset;
+        pp_vec3_sub(&c->p, &lhs_body->pos, &contact_offset);
+
+        // Calculate the contact impulse
+        PPVec3 contact_impulse;
+        pp_vec3_scale(&impulse, -1.0f, &contact_impulse);
+
+        // Calculate torque due to the collision (Torque = r x F)
+        PPVec3 torque;
+        pp_vec3_cross(&contact_offset, &contact_impulse, &torque);
+
+        // Assuming a simplified moment of inertia (I) as (2/5) * mass * radius^2 for the sphere
+        float I = lhs_body->inertia.m[0];
+
+        // Change in angular velocity due to torque = torque / moment of inertia
+        PPVec3 angular_acceleration;
+        pp_vec3_scale(&torque, 1.0f / I, &angular_acceleration);
+
+        // Update the angular velocity
+        pp_vec3_scale(&angular_acceleration, t, &angular_acceleration); // Scale by time step
+        pp_vec3_add(&lhs_body->a_vel, &angular_acceleration, &lhs_body->a_vel);
+
+        // float rolling_friction = 0.3f;
+        // Vec3 rolling_friction_force;
+        // vec3_scale(&lhs->body.a_vel, -rolling_friction * t, &rolling_friction_force);
+        // vec3_add(&lhs->body.a_vel, &rolling_friction_force, &lhs->body.a_vel);
+    }
 }
 
 static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPCollision* c) {
@@ -1119,7 +1176,7 @@ void pp_physics_step(float t) {
                 if(pp_tri_intersect(tri, &lhs_body->pos, &d, &p, &dist)) {
                     if(dist <= lhs_sphere->radius) {
                         PPCollision c;
-                        pp_fill_collision_info_sphere_triangle(lhs_sphere, tri, &p, &c);
+                        pp_fill_collision_info_sphere_triangle(lhs_sphere, tri, &p, dist, &c);
 
                         bool respond = true;
                         const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
@@ -1129,58 +1186,7 @@ void pp_physics_step(float t) {
                         }
 
                         if(respond) {
-                            float overlap = lhs_sphere->radius - dist;
-
-                            // Move the sphere out of overlap immediately
-                            PPVec3 adjustment;
-                            pp_vec3_scale(&c.n, overlap, &adjustment);
-                            pp_vec3_add(&lhs_body->pos, &adjustment, &lhs_body->pos);
-
-                            // Reflect the velocity based on the collision normal
-                            float vel_along_normal = pp_vec3_dot(&lhs_body->vel, &c.n);
-                            if (vel_along_normal < 0) {
-                                // Apply restitution
-                                PPVec3 vel_normal, vel_tangent;
-                                pp_vec3_scale(&c.n, vel_along_normal, &vel_normal);
-                                pp_vec3_sub(&lhs_body->vel, &vel_normal, &vel_tangent);
-
-                                float r = 1.0f + fmax(0 /*tri->bounce*/, lhs_body->bounce);
-                                float f = fmin(tri->friction, lhs_body->friction);
-
-                                PPVec3 impulse, friction_impulse;
-
-                                pp_vec3_scale(&vel_normal, -r, &impulse);
-                                pp_vec3_scale(&vel_tangent, -f, &friction_impulse);
-                                pp_vec3_add(&impulse, &friction_impulse, &impulse);
-                                pp_vec3_add(&lhs_body->vel, &impulse, &lhs_body->vel);
-
-                                PPVec3 contact_offset;
-                                pp_vec3_sub(&c.p, &lhs_body->pos, &contact_offset);
-
-                                // Calculate the contact impulse
-                                PPVec3 contact_impulse;
-                                pp_vec3_scale(&impulse, -1.0f, &contact_impulse);
-
-                                // Calculate torque due to the collision (Torque = r x F)
-                                PPVec3 torque;
-                                pp_vec3_cross(&contact_offset, &contact_impulse, &torque);
-
-                                // Assuming a simplified moment of inertia (I) as (2/5) * mass * radius^2 for the sphere
-                                float I = lhs_body->inertia.m[0];
-
-                                // Change in angular velocity due to torque = torque / moment of inertia
-                                PPVec3 angular_acceleration;
-                                pp_vec3_scale(&torque, 1.0f / I, &angular_acceleration);
-
-                                // Update the angular velocity
-                                pp_vec3_scale(&angular_acceleration, t, &angular_acceleration); // Scale by time step
-                                pp_vec3_add(&lhs_body->a_vel, &angular_acceleration, &lhs_body->a_vel);
-
-                                // float rolling_friction = 0.3f;
-                                // Vec3 rolling_friction_force;
-                                // vec3_scale(&lhs->body.a_vel, -rolling_friction * t, &rolling_friction_force);
-                                // vec3_add(&lhs->body.a_vel, &rolling_friction_force, &lhs->body.a_vel);
-                            }
+                            pp_sphere_triangle_response(lhs_sphere, tri, &c, t);
                         }
                     }
                 }
