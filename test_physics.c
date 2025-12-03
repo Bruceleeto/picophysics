@@ -136,5 +136,17 @@ int main(int argc, char* argv[]) {
     lhs = pp_physics_create_sphere(1.0f, &p1, 1, 0);
     CHECK(pp_physics_body_count() == 2, "Incorrect sphere count");
     CHECK(pp_physics_body_total_count() == 2, "Incorrect sphere count");
+
+    // Reset
+    pp_physics_clear();
+
+    PPBox* b1 = pp_physics_create_box(1.0f, 1.0f, 1.0f, &p1, 1.0f, 0);
+    PPSphere* s1 = pp_physics_create_sphere(1.0f, &p2, 1, 0);
+
+    pp_physics_step(1.0f / 60.0f);
+
+    CHECK(b1->body.pos.xyz[0] == p1.x, "Unexpected position\n");  // Boxes don't move
+    CHECK(s1->body.pos.xyz[0] == 1.0f, "Unexpected position\n");
+
     return 0;
 }
