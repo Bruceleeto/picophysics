@@ -16,11 +16,21 @@ extern "C" {
 #endif
 
 typedef struct _PPVec3 {
-    float xyz[3];
+    union {
+        struct {
+            float x, y, z;
+        };
+        float xyz[3];
+    };
 } PPVec3;
 
 typedef struct _PPQuaternion {
-    float xyzw[4];;
+    union {
+        struct {
+            float x, y, z, w;
+        };
+        float xyzw[4];
+    };
 } PPQuaternion;
 
 typedef struct _PPMat3 {
@@ -100,7 +110,7 @@ typedef struct _PPSphere {
 
 typedef struct _PPBox {
     PPBody body;
-    PPVec3 axis[3];
+    float whd[3]; // Width/height/depth
 } PPBox;
 
 typedef struct _PPTriangle {
@@ -139,10 +149,11 @@ const PPTriangle* pp_physics_triangle_at(size_t i);
 
 PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, BodyKind kind);
 void pp_physics_destroy_sphere(PPSphere* s);
-float pp_sphere_get_radius(PPSphere* s);
+float pp_sphere_get_radius(const PPSphere* s);
 
 PPBox* pp_physics_create_box(float width, float height, float depth, const PPVec3* pos, float mass, BodyKind kind);
 void pp_physics_destroy_box(PPBox* s);
+float pp_box_get_height(const PPBox* b);
 
 const PPBody* pp_physics_body_at(size_t i);
 size_t pp_physics_body_count();
@@ -300,6 +311,7 @@ PPQuaternion* pp_quat_set(PPQuaternion* q, float x, float y, float z, float w) {
 
 PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source) {
     pp_quat_set(target, source->xyzw[0], source->xyzw[1], source->xyzw[2], source->xyzw[3]);
+    return target;
 }
 
 void pp_quat_from_angular_velocity(const PPVec3* a_vel, float dt, PPQuaternion* q_rot) {
@@ -332,6 +344,15 @@ void pp_quat_multiply(const PPQuaternion* q1, const PPQuaternion* q2, PPQuaterni
     tmp.xyzw[3] = q1->xyzw[3] * q2->xyzw[3] - q1->xyzw[0] * q2->xyzw[0] - q1->xyzw[1] * q2->xyzw[1] - q1->xyzw[2] * q2->xyzw[2];
 
     *result = tmp;
+}
+
+void pp_quat_transform(const PPQuaternion* q, const PPVec3* v, PPVec3* ret) {
+    PPQuaternion conjugate, vq, temp, v_rot_q;
+    pp_quat_set(&conjugate, -q->x, -q->y, -q->z, q->w);
+    pp_quat_set(&vq, v->x, v->y, v->z, 0.0f);
+    pp_quat_multiply(q, &vq, &temp);
+    pp_quat_multiply(&temp, &conjugate, &v_rot_q);
+    pp_vec3_set(ret, v_rot_q.x, v_rot_q.y, v_rot_q.z);
 }
 
 void pp_quat_normalize(PPQuaternion* q) {
@@ -610,7 +631,11 @@ void pp_body_get_forward(PPBody* s, PPVec3* f) {
     pp_quat_forward(&s->rot, f);
 }
 
-float pp_sphere_get_radius(PPSphere* s) {
+float pp_box_get_height(const PPBox* b) {
+    return b->whd[1];
+}
+
+float pp_sphere_get_radius(const PPSphere* s) {
     return s->radius;
 }
 
@@ -724,9 +749,10 @@ PPBox* pp_box_init(PPBox* s, float width, float height, float depth, const PPVec
 
     pp_body_init(&s->body, pos, mass, kind);
 
-    pp_vec3_set(&s->axis[0], width, 0, 0);
-    pp_vec3_set(&s->axis[1], 0, height, 0);
-    pp_vec3_set(&s->axis[2], 0, 0, depth);
+    s->whd[0] = width;
+    s->whd[1] = height;
+    s->whd[2] = depth;
+
     return s;
 }
 
@@ -821,6 +847,23 @@ bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callbac
     }
 
     return false;
+}
+
+void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, const PPVec3* contact_point, PPCollision* c) {
+    // FIXME: This is not the correct normal. This is the normal from the
+    // contact point, to the sphere. But actually we want the surface normal
+    // of the box. To calculate that we'd need to know which side of the box
+    // the contact point is lying on, which would mean inverse transforming the
+    // contact point back into box local space and then testing the greatest
+    // component.
+    pp_vec3_sub(&lhs->body.pos, contact_point, &c->n);
+    c->dist = pp_vec3_length(&c->n);
+    if(c->dist > 0) {
+        c->n.xyz[0] /= c->dist;
+        c->n.xyz[1] /= c->dist;
+        c->n.xyz[2] /= c->dist;
+    }
+    pp_vec3_assign(&c->p, contact_point);
 }
 
 void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* rhs, float dist, PPCollision* c) {
@@ -953,6 +996,52 @@ void pp_physics_set_gravity(const PPVec3* v) {
     gravity_magnitude = pp_vec3_length(&gravity);
 }
 
+static void pp_sphere_box_response(PPSphere* sphere, PPBox* box, const PPCollision* c, float t) {
+    // c->dist is the distance between the sphere center and the contact point
+    // so the "overlap" is the radius minus the distance
+    float overlap = sphere->radius - c->dist;
+
+    PPVec3 adjustment_lhs, adjustment_rhs;
+    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_lhs);
+    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_rhs);
+    pp_vec3_add(&sphere->body.pos, &adjustment_lhs, &sphere->body.pos);
+    pp_vec3_sub(&box->body.pos, &adjustment_rhs, &box->body.pos);
+
+    PPVec3 rel_vel;
+    pp_vec3_sub(&box->body.vel, &sphere->body.vel, &rel_vel);   // v_rhs – v_lhs
+    float vel_along_normal = pp_vec3_dot(&rel_vel, &c->n);
+    if (vel_along_normal < 0) {
+        PPVec3 penetration, tangent;
+        pp_vec3_scale(&c->n, vel_along_normal, &penetration);
+        pp_vec3_sub(&rel_vel, &penetration, &tangent);
+
+        // Moving towards each other
+        float r = fmax(sphere->body.bounce, box->body.bounce);
+        float f = fmin(sphere->body.friction, box->body.friction);
+
+        float inv_mass_sum = sphere->body.inv_mass + box->body.inv_mass;
+        float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
+        PPVec3 impulse_n;
+        pp_vec3_scale(&c->n, j_n, &impulse_n);
+
+        float jt = -pp_vec3_dot(&rel_vel, &tangent) / inv_mass_sum;
+        jt = fmax(-j_n * f, fmin(jt, j_n * f));   // clamp to μ·|j_n|
+        PPVec3 impulse_t;
+        pp_vec3_normalize(&tangent);      // ensure unit tangent
+        pp_vec3_scale(&tangent, jt, &impulse_t);
+
+        PPVec3 impulse;
+        pp_vec3_add(&impulse_n, &impulse_t, &impulse);
+
+        PPVec3 dv_lhs, dv_rhs;
+        pp_vec3_scale(&impulse, sphere->body.inv_mass, &dv_lhs);
+        pp_vec3_scale(&impulse, box->body.inv_mass, &dv_rhs);
+
+        pp_vec3_add(&sphere->body.vel, &dv_lhs, &sphere->body.vel);   // v_lhs ← v_lhs + Δv
+        pp_vec3_sub(&box->body.vel, &dv_rhs, &box->body.vel);   // v_rhs ← v_rhs + Δv
+    }
+}
+
 static void pp_sphere_triangle_response(PPSphere* lhs_sphere, const PPTriangle* tri, const PPCollision* c, float t) {
     PPBody* lhs_body = PP_BODY(lhs_sphere);
     float overlap = lhs_sphere->radius - c->dist;
@@ -1030,7 +1119,7 @@ static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPColl
         float r = fmax(lhs->body.bounce, rhs->body.bounce);
         float f = fmin(lhs->body.friction, rhs->body.friction);
 
-        float inv_mass_sum = lhs->body->inv_mass + rhs->body->inv_mass;
+        float inv_mass_sum = lhs->body.inv_mass + rhs->body.inv_mass;
         float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
         PPVec3 impulse_n;
         pp_vec3_scale(&c->n, j_n, &impulse_n);
@@ -1051,6 +1140,52 @@ static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPColl
         pp_vec3_add(&lhs->body.vel, &dv_lhs, &lhs->body.vel);   // v_lhs ← v_lhs + Δv
         pp_vec3_sub(&rhs->body.vel, &dv_rhs, &rhs->body.vel);   // v_rhs ← v_rhs + Δv
     }
+}
+
+bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* contact_point) {
+    const PPVec3 bases[3] = {
+        {1, 0, 0},
+        {0, 1, 0},
+        {0, 0, 1}
+    };
+
+    PPVec3 axis[3];
+    float half_lengths[3] = {
+        rhs->whd[0] * 0.5f,
+        rhs->whd[1] * 0.5f,
+        rhs->whd[2] * 0.5f,
+    };
+
+    // Rotate the box axis into world space
+    pp_quat_transform(&rhs->body.rot, &bases[0], &axis[0]);
+    pp_quat_transform(&rhs->body.rot, &bases[1], &axis[1]);
+    pp_quat_transform(&rhs->body.rot, &bases[2], &axis[2]);
+
+    PPVec3 distance_vec, closest_point;
+    pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &distance_vec);
+    pp_vec3_assign(&closest_point, &rhs->body.pos);
+
+    for(int i = 0; i < 3; ++i) {
+        float dist = pp_vec3_dot(&distance_vec, &axis[i]);
+        if(dist >= half_lengths[i]) {
+            dist = half_lengths[i];
+        } else if(dist <= -half_lengths[i]) {
+            dist = -half_lengths[i];
+        }
+
+        PPVec3 tmp;
+        pp_vec3_scale(&axis[i], dist, &tmp);
+        pp_vec3_add(&closest_point, &tmp, &closest_point);
+    }
+
+    PPVec3 diff;
+    pp_vec3_sub(&lhs->body.pos, &closest_point, &diff);
+    if(pp_vec3_length(&diff) <= lhs->radius) {
+        pp_vec3_assign(contact_point, &closest_point);
+        return true;
+    }
+
+    return false;
 }
 
 void pp_physics_step(float t) {
@@ -1165,10 +1300,26 @@ void pp_physics_step(float t) {
                         pp_sphere_sphere_response(lhs_sphere, rhs_sphere, &c);
                     }
                 }
-            } else if(lhs_sphere && rhs_box) {
+            } else if((lhs_sphere && rhs_box) || (rhs_sphere && lhs_box)) {
                 // Sphere vs box
-            } else if(lhs_box && rhs_sphere) {
-                // Box vs Sphere
+                //
+                PPSphere* sphere = (lhs_sphere) ? lhs_sphere : rhs_sphere;
+                PPBox* box = (lhs_box) ? lhs_box : rhs_box;
+                PPVec3 contact;
+                if(pp_sphere_box_intersect(sphere, box, &contact)) {
+                    PPCollision c;
+                    pp_fill_collision_info_sphere_box(sphere, box, &contact, &c);
+
+                    bool respond = true;
+                    const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
+                    if (cb) {
+                        respond = cb->collision_callback(sphere, box, sphere->body.kind, box->body.kind);
+                    }
+
+                    if (respond) {
+                        pp_sphere_box_response(sphere, box, &c, t);
+                    }
+                }
             }
         }
 

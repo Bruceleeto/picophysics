@@ -131,14 +131,14 @@ bool ground_check(const void *lhs, const void *rhs, BodyKind k0, BodyKind k1)
 {
     // Abuse the user data pointer to store the grounded flag
     if (k0 == CAR_INNER_KIND) {
-        pp_sphere_set_user_data((PPSphere *) lhs, (void *) 1);
+        pp_body_set_user_data((PPBody *) lhs, (void *) 1);
     } else {
-        pp_sphere_set_user_data((PPSphere *) rhs, (void *) 1);
+        pp_body_set_user_data((PPBody *) rhs, (void *) 1);
     }
     return true;
 }
 
-void rotate_to_direction(PPSphere *sphere, const PPVec3 *target_forward, float dt)
+void rotate_to_direction(PPBox *sphere, const PPVec3 *target_forward, float dt)
 {
     PPVec3 forward;
     pp_vec3_set(&forward, 0, 0, -1);
@@ -149,10 +149,10 @@ void rotate_to_direction(PPSphere *sphere, const PPVec3 *target_forward, float d
 }
 
 void GameScene::on_load() {
-    pp_collision_map_add(CAR_BODY_KIND, CAR_INNER_KIND, &dont_collide);
-    pp_collision_map_add(CAR_INNER_KIND, BALL_KIND, &dont_collide);
-    pp_collision_map_add(CAR_BODY_KIND, ENV_FLOOR_KIND, &dont_collide);
-    pp_collision_map_add(CAR_INNER_KIND, ENV_FLOOR_KIND, &ground_check);
+    pp_physics_collision_map_add(CAR_BODY_KIND, CAR_INNER_KIND, &dont_collide);
+    pp_physics_collision_map_add(CAR_INNER_KIND, BALL_KIND, &dont_collide);
+    pp_physics_collision_map_add(CAR_BODY_KIND, ENV_FLOOR_KIND, &dont_collide);
+    pp_physics_collision_map_add(CAR_INNER_KIND, ENV_FLOOR_KIND, &ground_check);
 
     auto car_mesh2 = assets->load_mesh("assets/car/sedan-sports.obj");
     float cs = 1.0f / car_mesh2->aabb().max_dimension();
@@ -163,13 +163,13 @@ void GameScene::on_load() {
     ball_.body = pp_physics_create_sphere(0.5f, &pos, 0.01f, BALL_KIND);
 
     pp_vec3_set(&pos, 1.0f, 4, 0);
-    cars_[0].body = pp_physics_create_sphere(0.5f, &pos, 1.0, CAR_BODY_KIND);
-    cars_[0].shell = pp_physics_create_sphere(0.5f,
-                                              &pos,
-                                              car_mesh2->aabb().height() / 2,
-                                              CAR_INNER_KIND);
-    pp_sphere_lock_axis(cars_[0].body, PP_AXIS_LOCK_PITCH_AND_ROLL);
-    pp_sphere_set_angular_damping(cars_[0].body, 0.25f);
+    cars_[0].body = pp_physics_create_box(0.5f, 0.5f, 1.0f, &pos, 1.0, CAR_BODY_KIND);
+    cars_[0].roll_body = pp_physics_create_sphere(0.5f,
+                                                  &pos,
+                                                  car_mesh2->aabb().height() / 2,
+                                                  CAR_INNER_KIND);
+    pp_body_lock_axis(PP_BODY(cars_[0].body), PP_AXIS_LOCK_PITCH_AND_ROLL);
+    pp_body_set_angular_damping(PP_BODY(cars_[0].body), 0.25f);
 
     auto tex = assets->load_texture("assets/sand.png");
     auto floor_mat = assets->load_material(smlt::Material::BuiltIns::TEXTURE_ONLY);
@@ -178,15 +178,19 @@ void GameScene::on_load() {
     floor_mat->set_base_color_map(tex);
 
     auto car_mesh1 = assets->create_mesh(smlt::VertexSpecification::POSITION_AND_DIFFUSE);
-    car_mesh1->create_submesh_as_sphere("shell", floor_mat, car_mesh2->aabb().height() / 2, 10, 10);
+    car_mesh1->create_submesh_as_sphere("roll_body",
+                                        floor_mat,
+                                        car_mesh2->aabb().height() / 2,
+                                        10,
+                                        10);
 
-    cars_[0].shell_actor = create_child<smlt::Actor>(car_mesh1);
+    cars_[0].roll_body_actor = create_child<smlt::Actor>(car_mesh1);
     cars_[0].body_actor = create_child<smlt::Actor>(car_mesh2);
 
-    pp_sphere_set_bounce(ball_.body, 0.9f);
-    pp_sphere_set_damping(ball_.body, 0.001f);
-    pp_sphere_set_bounce(cars_[0].body, 0.1f);
-    pp_sphere_set_bounce(cars_[0].shell, 0.1f);
+    pp_body_set_bounce(PP_BODY(ball_.body), 0.9f);
+    pp_body_set_damping(PP_BODY(ball_.body), 0.001f);
+    pp_body_set_bounce(PP_BODY(cars_[0].body), 0.1f);
+    pp_body_set_bounce(PP_BODY(cars_[0].roll_body), 0.1f);
 
     define_stadium();
 
@@ -233,8 +237,8 @@ void GameScene::on_load() {
 
 void GameScene::on_fixed_update(float step)
 {
-    pp_sphere_set_user_data(cars_[0].shell, (void *) 0);
-    pp_sphere_set_damping(cars_[0].shell, 0.01f);
+    pp_body_set_user_data(PP_BODY(cars_[0].roll_body), (void *) 0);
+    pp_body_set_damping(PP_BODY(cars_[0].roll_body), 0.01f);
 
     pp_physics_step(step);
 
@@ -243,15 +247,15 @@ void GameScene::on_fixed_update(float step)
     // The body needs to be positioned above the inner ball (which is smaller)
 
     PPVec3 inner_pos;
-    pp_sphere_get_position(cars_[0].shell, &inner_pos);
-    float br = pp_sphere_get_radius(cars_[0].body);
-    float ir = pp_sphere_get_radius(cars_[0].shell);
+    pp_body_get_position(PP_BODY(cars_[0].roll_body), &inner_pos);
+    float br = pp_box_get_height(cars_[0].body);
+    float ir = pp_sphere_get_radius(cars_[0].roll_body);
 
-    // Align the car body with the inner shell
-    pp_sphere_set_position(cars_[0].body,
-                           inner_pos.xyz[0],
-                           inner_pos.xyz[1] + (br - ir),
-                           inner_pos.xyz[2]);
+    // Align the car body with the inner roll_body
+    pp_body_set_position(PP_BODY(cars_[0].body),
+                         inner_pos.xyz[0],
+                         inner_pos.xyz[1] + (br - ir),
+                         inner_pos.xyz[2]);
 }
 
 void GameScene::on_update(float dt) {
@@ -261,10 +265,10 @@ void GameScene::on_update(float dt) {
     cars_[0].body_actor->transform->set_orientation(
         smlt::Quaternion(q.xyzw[0], q.xyzw[1], q.xyzw[2], q.xyzw[3]));
 
-    p = cars_[0].shell->body.pos;
-    q = cars_[0].shell->body.rot;
-    cars_[0].shell_actor->transform->set_position(smlt::Vec3(p.xyz[0], p.xyz[1], p.xyz[2]));
-    cars_[0].shell_actor->transform->set_orientation(
+    p = cars_[0].roll_body->body.pos;
+    q = cars_[0].roll_body->body.rot;
+    cars_[0].roll_body_actor->transform->set_position(smlt::Vec3(p.xyz[0], p.xyz[1], p.xyz[2]));
+    cars_[0].roll_body_actor->transform->set_orientation(
         smlt::Quaternion(q.xyzw[0], q.xyzw[1], q.xyzw[2], q.xyzw[3]));
 
     p = ball_.body->body.pos;
@@ -280,23 +284,23 @@ void GameScene::on_update(float dt) {
     float thrust = pp_vec3_length(&drive_force);
 
     if (fabs(thrust) > 0.0001f) {
-        rotate_to_direction(cars_[0].body, &drive_force, 5.0f * dt);
+        rotate_to_direction(cars_[0].body, &drive_force, smlt::clamp(10.0f * dt, 0.0f, 1.0f));
     }
 
     PPVec3 f;
-    pp_sphere_get_forward(cars_[0].body, &f);
+    pp_body_get_forward(PP_BODY(cars_[0].body), &f);
 
-    bool grounded = (bool) pp_sphere_get_user_data(cars_[0].shell);
+    bool grounded = (bool) pp_body_get_user_data(PP_BODY(cars_[0].roll_body));
     if (grounded) {
         pp_vec3_scale(&f, thrust * 10.0f, &f);
-        pp_sphere_add_force(cars_[0].shell, f.xyz[0], f.xyz[1], f.xyz[2]);
+        pp_body_add_force(PP_BODY(cars_[0].roll_body), f.xyz[0], f.xyz[1], f.xyz[2]);
 
         if (input->axis_was_pressed("Fire1") && grounded) {
-            pp_sphere_add_force(cars_[0].shell, 0, 100.0f, 0);
+            pp_body_add_force(PP_BODY(cars_[0].roll_body), 0, 100.0f, 0);
         }
     } else {
         pp_vec3_scale(&f, thrust * 0.5f, &f);
-        pp_sphere_add_force(cars_[0].shell, f.xyz[0], f.xyz[1], f.xyz[2]);
+        pp_body_add_force(PP_BODY(cars_[0].roll_body), f.xyz[0], f.xyz[1], f.xyz[2]);
     }
 
     camera_->transform->look_at(cars_[0].body_actor->transform->position(), smlt::Vec3::up());

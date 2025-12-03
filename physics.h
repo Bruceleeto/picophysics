@@ -141,7 +141,7 @@ void pp_physics_step(float t);
 bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance);
 void pp_physics_clear();
 void pp_physics_set_gravity(const PPVec3* v);
-bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind));
+bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c));
 
 PPTriangle* pp_physics_create_triangle(const PPVec3* v1, const PPVec3* v2, const PPVec3* v3, BodyKind kind);
 size_t pp_physics_triangle_count();
@@ -149,10 +149,11 @@ const PPTriangle* pp_physics_triangle_at(size_t i);
 
 PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, BodyKind kind);
 void pp_physics_destroy_sphere(PPSphere* s);
-float pp_sphere_get_radius(PPSphere* s);
+float pp_sphere_get_radius(const PPSphere* s);
 
 PPBox* pp_physics_create_box(float width, float height, float depth, const PPVec3* pos, float mass, BodyKind kind);
 void pp_physics_destroy_box(PPBox* s);
+float pp_box_get_height(const PPBox* b);
 
 const PPBody* pp_physics_body_at(size_t i);
 size_t pp_physics_body_count();
@@ -206,7 +207,7 @@ static int tri_count = 0;
 static struct _PPCollisionMapEntry {
     BodyKind kind1;
     BodyKind kind2;
-    bool (*collision_callback)(const void*, const void*, BodyKind, BodyKind);
+    bool (*collision_callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c);
 } collision_map[32];
 
 static int collision_map_count = 0;
@@ -310,6 +311,7 @@ PPQuaternion* pp_quat_set(PPQuaternion* q, float x, float y, float z, float w) {
 
 PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source) {
     pp_quat_set(target, source->xyzw[0], source->xyzw[1], source->xyzw[2], source->xyzw[3]);
+    return target;
 }
 
 void pp_quat_from_angular_velocity(const PPVec3* a_vel, float dt, PPQuaternion* q_rot) {
@@ -629,7 +631,11 @@ void pp_body_get_forward(PPBody* s, PPVec3* f) {
     pp_quat_forward(&s->rot, f);
 }
 
-float pp_sphere_get_radius(PPSphere* s) {
+float pp_box_get_height(const PPBox* b) {
+    return b->whd[1];
+}
+
+float pp_sphere_get_radius(const PPSphere* s) {
     return s->radius;
 }
 
@@ -831,7 +837,7 @@ const struct _PPCollisionMapEntry* pp_physics_collision_map_search(BodyKind kind
     return NULL;
 }
 
-bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind)) {
+bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c)) {
     if(!pp_physics_collision_map_search(kind1, kind2)) {
         struct _PPCollisionMapEntry* entry = &collision_map[collision_map_count++];
         entry->kind1 = kind1;
@@ -990,59 +996,49 @@ void pp_physics_set_gravity(const PPVec3* v) {
     gravity_magnitude = pp_vec3_length(&gravity);
 }
 
-static void pp_sphere_box_response(PPSphere* lhs_sphere, const PPBox* box, const PPCollision* c, float t) {
-    PPBody* lhs_body = PP_BODY(lhs_sphere);
-    float overlap = lhs_sphere->radius - c->dist;
+static void pp_sphere_box_response(PPSphere* sphere, PPBox* box, const PPCollision* c, float t) {
+    // c->dist is the distance between the sphere center and the contact point
+    // so the "overlap" is the radius minus the distance
+    float overlap = sphere->radius - c->dist;
 
-    // Move the sphere out of overlap immediately
-    PPVec3 adjustment;
-    pp_vec3_scale(&c->n, overlap, &adjustment);
-    pp_vec3_add(&lhs_body->pos, &adjustment, &lhs_body->pos);
+    PPVec3 adjustment_lhs, adjustment_rhs;
+    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_lhs);
+    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_rhs);
+    pp_vec3_add(&sphere->body.pos, &adjustment_lhs, &sphere->body.pos);
+    pp_vec3_sub(&box->body.pos, &adjustment_rhs, &box->body.pos);
 
-    // Reflect the velocity based on the collision normal
-    float vel_along_normal = pp_vec3_dot(&lhs_body->vel, &c->n);
+    PPVec3 rel_vel;
+    pp_vec3_sub(&box->body.vel, &sphere->body.vel, &rel_vel);   // v_rhs – v_lhs
+    float vel_along_normal = pp_vec3_dot(&rel_vel, &c->n);
     if (vel_along_normal < 0) {
-        // Apply restitution
-        PPVec3 vel_normal, vel_tangent;
-        pp_vec3_scale(&c->n, vel_along_normal, &vel_normal);
-        pp_vec3_sub(&lhs_body->vel, &vel_normal, &vel_tangent);
+        PPVec3 penetration, tangent;
+        pp_vec3_scale(&c->n, vel_along_normal, &penetration);
+        pp_vec3_sub(&rel_vel, &penetration, &tangent);
 
-        float r = 1.0f + fmax(0 /*tri->bounce*/, lhs_body->bounce);
-        float f = fmin(box->body.friction, lhs_body->friction);
+        // Moving towards each other
+        float r = fmax(sphere->body.bounce, box->body.bounce);
+        float f = fmin(sphere->body.friction, box->body.friction);
 
-        PPVec3 impulse, friction_impulse;
+        float inv_mass_sum = sphere->body.inv_mass + box->body.inv_mass;
+        float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
+        PPVec3 impulse_n;
+        pp_vec3_scale(&c->n, j_n, &impulse_n);
 
-        pp_vec3_scale(&vel_normal, -r, &impulse);
-        pp_vec3_scale(&vel_tangent, -f, &friction_impulse);
-        pp_vec3_add(&impulse, &friction_impulse, &impulse);
-        pp_vec3_add(&lhs_body->vel, &impulse, &lhs_body->vel);
+        float jt = -pp_vec3_dot(&rel_vel, &tangent) / inv_mass_sum;
+        jt = fmax(-j_n * f, fmin(jt, j_n * f));   // clamp to μ·|j_n|
+        PPVec3 impulse_t;
+        pp_vec3_normalize(&tangent);      // ensure unit tangent
+        pp_vec3_scale(&tangent, jt, &impulse_t);
 
-        PPVec3 contact_offset;
-        pp_vec3_sub(&c->p, &lhs_body->pos, &contact_offset);
+        PPVec3 impulse;
+        pp_vec3_add(&impulse_n, &impulse_t, &impulse);
 
-        // Calculate the contact impulse
-        PPVec3 contact_impulse;
-        pp_vec3_scale(&impulse, -1.0f, &contact_impulse);
+        PPVec3 dv_lhs, dv_rhs;
+        pp_vec3_scale(&impulse, sphere->body.inv_mass, &dv_lhs);
+        pp_vec3_scale(&impulse, box->body.inv_mass, &dv_rhs);
 
-        // Calculate torque due to the collision (Torque = r x F)
-        PPVec3 torque;
-        pp_vec3_cross(&contact_offset, &contact_impulse, &torque);
-
-        // Assuming a simplified moment of inertia (I) as (2/5) * mass * radius^2 for the sphere
-        float I = lhs_body->inertia.m[0];
-
-        // Change in angular velocity due to torque = torque / moment of inertia
-        PPVec3 angular_acceleration;
-        pp_vec3_scale(&torque, 1.0f / I, &angular_acceleration);
-
-        // Update the angular velocity
-        pp_vec3_scale(&angular_acceleration, t, &angular_acceleration); // Scale by time step
-        pp_vec3_add(&lhs_body->a_vel, &angular_acceleration, &lhs_body->a_vel);
-
-        // float rolling_friction = 0.3f;
-        // Vec3 rolling_friction_force;
-        // vec3_scale(&lhs->body.a_vel, -rolling_friction * t, &rolling_friction_force);
-        // vec3_add(&lhs->body.a_vel, &rolling_friction_force, &lhs->body.a_vel);
+        pp_vec3_add(&sphere->body.vel, &dv_lhs, &sphere->body.vel);   // v_lhs ← v_lhs + Δv
+        pp_vec3_sub(&box->body.vel, &dv_rhs, &box->body.vel);   // v_rhs ← v_rhs + Δv
     }
 }
 
@@ -1297,7 +1293,7 @@ void pp_physics_step(float t) {
                     bool respond = true;
                     const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
                     if (cb) {
-                        respond = cb->collision_callback(lhs_sphere, rhs_sphere, lhs_body->kind, rhs_body->kind);
+                        respond = cb->collision_callback(lhs_sphere, rhs_sphere, lhs_body->kind, rhs_body->kind, &c);
                     }
 
                     if (respond) {
@@ -1317,7 +1313,7 @@ void pp_physics_step(float t) {
                     bool respond = true;
                     const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
                     if (cb) {
-                        respond = cb->collision_callback(sphere, box, sphere->body.kind, box->body.kind);
+                        respond = cb->collision_callback(sphere, box, sphere->body.kind, box->body.kind, &c);
                     }
 
                     if (respond) {
@@ -1343,7 +1339,7 @@ void pp_physics_step(float t) {
                         const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
 
                         if(cb) {
-                            respond = cb->collision_callback(lhs_sphere, tri, lhs_body->kind, tri->kind);
+                            respond = cb->collision_callback(lhs_sphere, tri, lhs_body->kind, tri->kind, &c);
                         }
 
                         if(respond) {

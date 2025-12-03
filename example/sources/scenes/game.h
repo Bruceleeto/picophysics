@@ -6,11 +6,11 @@
 
 
 typedef struct _Car {
-    PPSphere *body;
-    PPSphere *shell;
+    PPBox *body;
+    PPSphere *roll_body;
 
     smlt::ActorPtr body_actor;
-    smlt::ActorPtr shell_actor;
+    smlt::ActorPtr roll_body_actor;
 } Car;
 
 typedef struct _Ball

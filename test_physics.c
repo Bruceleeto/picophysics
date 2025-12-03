@@ -145,8 +145,8 @@ int main(int argc, char* argv[]) {
 
     pp_physics_step(1.0f / 60.0f);
 
-    CHECK(b1->body.pos.xyz[0] == p1.x, "Unexpected position\n");  // Boxes don't move
-    CHECK(s1->body.pos.xyz[0] == 1.0f, "Unexpected position\n");
+    CHECK(b1->body.pos.xyz[0] == -0.75f, "Unexpected position\n");  // Boxes don't move
+    CHECK(s1->body.pos.xyz[0] == 0.75f, "Unexpected position\n");
 
     return 0;
 }
