@@ -82,6 +82,7 @@ typedef struct _PPBody {
     float mass;
     float friction;
     PPMat3 inertia;
+    float inv_mass;
 
     BodyKind kind;
 
@@ -693,6 +694,7 @@ static void pp_body_init(PPBody* body, const PPVec3* pos, float mass, BodyKind k
     pp_vec3_set(&body->pos, pos->xyz[0], pos->xyz[1], pos->xyz[2]);
     body->kind = kind;
     body->mass = mass;
+    body->inv_mass = 1.0f / mass;
     body->friction = 0.3f;
     body->damping = 0.01f;
     body->a_damping = 0.02f;
@@ -1028,7 +1030,7 @@ static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPColl
         float r = fmax(lhs->body.bounce, rhs->body.bounce);
         float f = fmin(lhs->body.friction, rhs->body.friction);
 
-        float inv_mass_sum = (1.0f / lhs->body.mass) + (1.0f / rhs->body.mass);
+        float inv_mass_sum = lhs->body->inv_mass + rhs->body->inv_mass;
         float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
         PPVec3 impulse_n;
         pp_vec3_scale(&c->n, j_n, &impulse_n);
@@ -1043,8 +1045,8 @@ static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPColl
         pp_vec3_add(&impulse_n, &impulse_t, &impulse);
 
         PPVec3 dv_lhs, dv_rhs;
-        pp_vec3_scale(&impulse,  1.0f / lhs->body.mass, &dv_lhs);
-        pp_vec3_scale(&impulse,  1.0f / rhs->body.mass, &dv_rhs);
+        pp_vec3_scale(&impulse, lhs->body.inv_mass, &dv_lhs);
+        pp_vec3_scale(&impulse, rhs->body.inv_mass, &dv_rhs);
 
         pp_vec3_add(&lhs->body.vel, &dv_lhs, &lhs->body.vel);   // v_lhs ← v_lhs + Δv
         pp_vec3_sub(&rhs->body.vel, &dv_rhs, &rhs->body.vel);   // v_rhs ← v_rhs + Δv
