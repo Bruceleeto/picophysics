@@ -1,3 +1,75 @@
+/**
+ * # Picophysics
+ *
+ * Picophysics is a very basic physics engine for games. It is not supposed to be fully realistic
+ * and is designed to be used particularly on low power systems (N64, Dreamcast). It was built
+ * for the N64 port of the Dreamcast game Driving Strikers, where every cycle counts and I needed
+ * full control and understanding of what was happening.
+ *
+ * # Features
+ *
+ * - Create fully sphere dynamic spheres and apply linear and angular forces
+ * - Create environments using triangles and boxes
+ * - Easy to use collision callback system to respond to detected collisions and to
+ *   choose whether to respond at at all (return true to respond)
+ * - Ray casting
+ * - Axis-locking of rotations
+ * - Bodies have friction and bounciness coefficients
+ * - Very fast, no dynamic memory allocations
+ *
+ * # Overview
+ *
+ * Picophysics only supports the following primitives:
+ *
+ * - Spheres (fully dynamic and responsive)
+ * - Boxes (currently kinematic, for platforms / obstacles etc.)
+ * - Triangles (static environment)
+ *
+ * Bodies are not composable; there's no separation between a body and a collider like in other
+ * physics engines there are simply Spheres and Boxes which react to each other and the environment.
+ *
+ * Currently Spheres are the only fully dynamic and responsive object. Ray-casting
+ * the world is also supported.
+ *
+ * There is only one global "world", all things are created with in it, and you can empty
+ * it with pp_physics_clear(). You also don't need to initialise the world, just start creating
+ * bodies and call pp_physics_step(dt) to update.
+ *
+ * The library statically allocates memory, by default you can have:
+ *
+ *  - 32 bodies (spheres + boxes)
+ *  - 128 triangles
+ *
+ * If you need more than that you can define PHYSICS_MAX_OBJECTS or PHYSICS_MAX_TRIANGLES
+ * before including physics.h.
+ *
+ * # Help needed!
+ *
+ * I am *not* a mathematician! Collision response is something I'm finding quite
+ * difficult to understand (particularly angular/torque responses). There are definitely
+ * issues in the collision response code. I would like objects to roll correctly, and for
+ * friction to impact angular velocity (currently only angular damping is respected) if you
+ * can help fix it, I'd appreciate it!
+ *
+ * # Roadmap
+ *
+ * - Add collision response for Boxes
+ * - Add fixed and spring joints (links) between objects
+ * - Simplify/share collision response logic across all things
+ * - Optimisations (replacing divisions where possible)
+ *
+ * I have no intention of adding more than this! If you want something more there are a bunch
+ * of great open-source physics engines out there (e.g. Bullet, Box2D, ODE, Bounce..)
+ *
+ * # Usage
+ *
+ * Picophysics is a single-file header library (in the spirit of stb). To use it
+ * you must do this in a single .c/.cpp file:
+ *
+ * #define PHYSICS_IMPLEMENTATION
+ * #include "physics.h"
+ */
+
 #ifndef PICOPHYSICS_H
 #define PICOPHYSICS_H
 
@@ -189,8 +261,13 @@ void pp_body_look_at(PPBody* s, float x, float y, float z);
 
 #ifdef PHYSICS_IMPLEMENTATION
 
-#define PHYSICS_MAX_OBJECTS 32
-#define PHYSICS_MAX_TRIANGLES 128
+#ifndef PHYSICS_MAX_OBJECTS
+    #define PHYSICS_MAX_OBJECTS 32
+#endif
+
+#ifndef PHYSICS_MAX_TRIANGLES
+    #define PHYSICS_MAX_TRIANGLES 128
+#endif
 
 typedef union _PPObject {
     struct _PPSphere s;
