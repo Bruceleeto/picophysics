@@ -246,7 +246,7 @@ void pp_body_set_user_data(PPBody* s, void* data);
 void* pp_body_get_user_data(const PPBody* s);
 bool pp_body_set_friction(PPBody* s, float f);
 void pp_body_get_velocity(const PPBody* s, PPVec3* vel);
-
+void pp_body_get_velocity_at_position(const PPBody* b, const PPVec3* p, PPVec3* ret);
 void pp_body_set_angular_velocity(PPBody* s, float x, float y, float z);
 void pp_body_set_velocity(PPBody* s, float x, float y, float z);
 void pp_body_set_angular_acceleration(PPBody* s, float x, float y, float z);
@@ -851,6 +851,13 @@ void pp_body_get_position(PPBody *s, PPVec3* pos) {
 
 void pp_body_set_position(PPBody *s, float x, float y, float z) {
     pp_vec3_set(&s->pos, x, y, z);
+}
+
+void pp_body_get_velocity_at_position(const PPBody* b, const PPVec3* p, PPVec3* ret) {
+    PPVec3 rel_pos, local_rel_pos, a_vel_contrib;
+    pp_vec3_subtract(p, &b->pos, &rel_pos);
+    pp_vec3_cross(&b->a_vel, &local_rel_pos, &a_vel_contrib);
+    pp_vec3_add(&b->pos, &a_vel_contrib, ret);
 }
 
 void pp_body_get_velocity(const PPBody* s, PPVec3* vel) {
