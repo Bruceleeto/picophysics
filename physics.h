@@ -544,6 +544,12 @@ void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQu
     result->w = s0 * q0->w + s1 * q1_temp.xyzw[3];
 }
 
+static float pp_plane_distance(const PPVec3* n, const float d, const PPVec3* p) {
+    float numerator = fabsf(n->x * p->x + n->y * p->y + n->z * p->z + d);
+    float denominator = sqrtf(n->x * n->x + n->y * n->y + n->z * n->z);
+    return numerator / denominator;
+}
+
 bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance);
 bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance);
 
@@ -948,21 +954,11 @@ bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callbac
     return false;
 }
 
-void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, const PPVec3* contact_point, PPCollision* c) {
-    // FIXME: This is not the correct normal. This is the normal from the
-    // contact point, to the sphere. But actually we want the surface normal
-    // of the box. To calculate that we'd need to know which side of the box
-    // the contact point is lying on, which would mean inverse transforming the
-    // contact point back into box local space and then testing the greatest
-    // component.
-    pp_vec3_sub(&lhs->body.pos, contact_point, &c->n);
-    c->dist = pp_vec3_length(&c->n);
-    if(c->dist > 0) {
-        c->n.xyz[0] /= c->dist;
-        c->n.xyz[1] /= c->dist;
-        c->n.xyz[2] /= c->dist;
-    }
+void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, const PPVec3* contact_point, const PPVec3* n, PPCollision* c) {
+    PPVec3 t;
+    c->dist = pp_vec3_length(pp_vec3_sub(contact_point, &lhs->body.pos, &t));
     pp_vec3_assign(&c->p, contact_point);
+    pp_vec3_assign(&c->n, n);
 }
 
 void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* rhs, float dist, PPCollision* c) {
@@ -1241,7 +1237,11 @@ static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPColl
     }
 }
 
-bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* contact_point) {
+static inline bool flt_close(const float a, const float b) {
+    return (a + FLT_EPSILON > b) && (a - FLT_EPSILON) < b;
+}
+
+bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* contact_point, PPVec3* n) {
     const PPVec3 bases[3] = {
         {1, 0, 0},
         {0, 1, 0},
@@ -1281,6 +1281,25 @@ bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* cont
     pp_vec3_sub(&lhs->body.pos, &closest_point, &diff);
     if(pp_vec3_length(&diff) <= lhs->radius) {
         pp_vec3_assign(contact_point, &closest_point);
+
+        PPVec3 rel_point;
+        pp_vec3_sub(contact_point, &lhs->body.pos, &rel_point);
+        float d;
+        for(int i = 0; i < 3; ++i) {
+            d = pp_plane_distance(&axis[i], half_lengths[i], &rel_point);
+            if(flt_close(d, 0.0f)) {
+                pp_vec3_assign(n, &bases[i]);
+                return true;
+            }
+
+            d = pp_plane_distance(&axis[i], -half_lengths[i], &rel_point);
+            if(flt_close(d, 0.0f)) {
+                pp_vec3_set(n, -bases[i].x, -bases[i].y, -bases[i].z);
+                return true;
+            }
+        }
+
+        assert(true && "Couldn't find contact normal");
         return true;
     }
 
@@ -1297,7 +1316,6 @@ void pp_physics_step(float t) {
         if(!body->is_alive) {
             continue;
         }
-
 
         // Apply gravity to acceleration before applying acceleration
         // to velocity
@@ -1404,10 +1422,10 @@ void pp_physics_step(float t) {
                 //
                 PPSphere* sphere = (lhs_sphere) ? lhs_sphere : rhs_sphere;
                 PPBox* box = (lhs_box) ? lhs_box : rhs_box;
-                PPVec3 contact;
-                if(pp_sphere_box_intersect(sphere, box, &contact)) {
+                PPVec3 contact, n;
+                if(pp_sphere_box_intersect(sphere, box, &contact, &n)) {
                     PPCollision c;
-                    pp_fill_collision_info_sphere_box(sphere, box, &contact, &c);
+                    pp_fill_collision_info_sphere_box(sphere, box, &contact, &n, &c);
 
                     bool respond = true;
                     const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
