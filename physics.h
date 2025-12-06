@@ -376,23 +376,23 @@ bool pp_vec3_normalize(PPVec3 *v) {
 }
 
 PPQuaternion* pp_quat_init(PPQuaternion* q) {
-    q->xyzw[0] = 0.0f;
-    q->xyzw[1] = 0.0f;
-    q->xyzw[2] = 0.0f;
-    q->xyzw[3] = 1.0f;
+    q->x = 0.0f;
+    q->y = 0.0f;
+    q->z = 0.0f;
+    q->w = 1.0f;
     return q;
 }
 
 PPQuaternion* pp_quat_set(PPQuaternion* q, float x, float y, float z, float w) {
-    q->xyzw[0] = x;
-    q->xyzw[1] = y;
-    q->xyzw[2] = z;
-    q->xyzw[3] = w;
+    q->x = x;
+    q->y = y;
+    q->z = z;
+    q->w = w;
     return q;
 }
 
 PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source) {
-    pp_quat_set(target, source->xyzw[0], source->xyzw[1], source->xyzw[2], source->xyzw[3]);
+    pp_quat_set(target, source->x, source->y, source->z, source->w);
     return target;
 }
 
@@ -408,10 +408,10 @@ void pp_quat_from_angular_velocity(const PPVec3* a_vel, float dt, PPQuaternion* 
         float cos_half_angle = cosf(angle / 2);
 
         // Create the quaternion
-        q_rot->xyzw[0] = axis.xyz[0] * sin_half_angle;
-        q_rot->xyzw[1] = axis.xyz[1] * sin_half_angle;
-        q_rot->xyzw[2] = axis.xyz[2] * sin_half_angle;
-        q_rot->xyzw[3] = cos_half_angle;
+        q_rot->x = axis.xyz[0] * sin_half_angle;
+        q_rot->y = axis.xyz[1] * sin_half_angle;
+        q_rot->z = axis.xyz[2] * sin_half_angle;
+        q_rot->w = cos_half_angle;
     } else {
         // If there is no rotation
         pp_quat_init(q_rot);
@@ -420,10 +420,10 @@ void pp_quat_from_angular_velocity(const PPVec3* a_vel, float dt, PPQuaternion* 
 
 void pp_quat_multiply(const PPQuaternion* q1, const PPQuaternion* q2, PPQuaternion* result) {
     PPQuaternion tmp;
-    tmp.xyzw[0] = q1->xyzw[3] * q2->xyzw[0] + q1->xyzw[0] * q2->xyzw[3] + q1->xyzw[1] * q2->xyzw[2] - q1->xyzw[2] * q2->xyzw[1];
-    tmp.xyzw[1] = q1->xyzw[3] * q2->xyzw[1] - q1->xyzw[0] * q2->xyzw[2] + q1->xyzw[1] * q2->xyzw[3] + q1->xyzw[2] * q2->xyzw[0];
-    tmp.xyzw[2] = q1->xyzw[3] * q2->xyzw[2] + q1->xyzw[0] * q2->xyzw[1] - q1->xyzw[1] * q2->xyzw[0] + q1->xyzw[2] * q2->xyzw[3];
-    tmp.xyzw[3] = q1->xyzw[3] * q2->xyzw[3] - q1->xyzw[0] * q2->xyzw[0] - q1->xyzw[1] * q2->xyzw[1] - q1->xyzw[2] * q2->xyzw[2];
+    tmp.xyzw[0] = q1->w * q2->x + q1->x * q2->w + q1->y * q2->z - q1->z * q2->y;
+    tmp.xyzw[1] = q1->w * q2->y - q1->x * q2->z + q1->y * q2->w + q1->z * q2->x;
+    tmp.xyzw[2] = q1->w * q2->z + q1->x * q2->y - q1->y * q2->x + q1->z * q2->w;
+    tmp.xyzw[3] = q1->w * q2->w - q1->x * q2->x - q1->y * q2->y - q1->z * q2->z;
 
     *result = tmp;
 }
@@ -443,21 +443,21 @@ void pp_quat_transform(const PPQuaternion* q, const PPVec3* v, PPVec3* ret) {
 }
 
 void pp_quat_normalize(PPQuaternion* q) {
-    float norm = sqrtf(q->xyzw[0] * q->xyzw[0] + q->xyzw[1] * q->xyzw[1] + q->xyzw[2] * q->xyzw[2] + q->xyzw[3] * q->xyzw[3]);
+    float norm = sqrtf(q->x * q->x + q->y * q->y + q->z * q->z + q->w * q->w);
     if (norm > 0) {
-        q->xyzw[0] /= norm;
-        q->xyzw[1] /= norm;
-        q->xyzw[2] /= norm;
-        q->xyzw[3] /= norm;
+        q->x /= norm;
+        q->y /= norm;
+        q->z /= norm;
+        q->w /= norm;
     }
 }
 
 void pp_quat_forward(const PPQuaternion* q, PPVec3* out)
 {
-    float x = q->xyzw[0];
-    float y = q->xyzw[1];
-    float z = q->xyzw[2];
-    float w = q->xyzw[3];
+    float x = q->x;
+    float y = q->y;
+    float z = q->z;
+    float w = q->w;
 
     out->xyz[0] = 2.0f * (x * z + w * y);
     out->xyz[1] = 2.0f * (y * z - w * x);
@@ -470,19 +470,19 @@ void pp_quat_between(const PPVec3* v0, const PPVec3* v1, PPQuaternion* result) {
     // If the vectors are exactly opposite, return a 180-degree rotation around an arbitrary axis
     if (dot < -1.0f + 1e-6f) {
         // Rotate around the Y axis
-        result->xyzw[0] = 0.0f;
-        result->xyzw[1] = 1.0f;
-        result->xyzw[2] = 0.0f;
-        result->xyzw[3] = 0.0f;
+        result->x = 0.0f;
+        result->y = 1.0f;
+        result->z = 0.0f;
+        result->w = 0.0f;
         return;
     }
 
     // If the vectors are exactly the same, return the identity quaternion
     if (dot > 1.0f - 1e-6f) {
-        result->xyzw[0] = 0.0f;
-        result->xyzw[1] = 0.0f;
-        result->xyzw[2] = 0.0f;
-        result->xyzw[3] = 1.0f;
+        result->x = 0.0f;
+        result->y = 0.0f;
+        result->z = 0.0f;
+        result->w = 1.0f;
         return;
     }
 
@@ -500,21 +500,21 @@ void pp_quat_between(const PPVec3* v0, const PPVec3* v1, PPQuaternion* result) {
     // Calculate the quaternion
     float half_angle = angle * 0.5f;
     float sin_half_angle = sinf(half_angle);
-    result->xyzw[0] = axis.xyz[0] * sin_half_angle;
-    result->xyzw[1] = axis.xyz[1] * sin_half_angle;
-    result->xyzw[2] = axis.xyz[2] * sin_half_angle;
-    result->xyzw[3] = cosf(half_angle);
+    result->x = axis.xyz[0] * sin_half_angle;
+    result->y = axis.xyz[1] * sin_half_angle;
+    result->z = axis.xyz[2] * sin_half_angle;
+    result->w = cosf(half_angle);
 }
 
 void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQuaternion* result) {
-    float dot = q0->xyzw[0] * q1->xyzw[0] + q0->xyzw[1] * q1->xyzw[1] + q0->xyzw[2] * q1->xyzw[2] + q0->xyzw[3] * q1->xyzw[3];
+    float dot = q0->x * q1->x + q0->y * q1->y + q0->z * q1->z + q0->w * q1->w;
 
     PPQuaternion q1_temp;
     if (dot < 0.0f) {
-        q1_temp.xyzw[0] = -q1->xyzw[0];
-        q1_temp.xyzw[1] = -q1->xyzw[1];
-        q1_temp.xyzw[2] = -q1->xyzw[2];
-        q1_temp.xyzw[3] = -q1->xyzw[3];
+        q1_temp.xyzw[0] = -q1->x;
+        q1_temp.xyzw[1] = -q1->y;
+        q1_temp.xyzw[2] = -q1->z;
+        q1_temp.xyzw[3] = -q1->w;
         dot = -dot;
     } else {
         q1_temp = *q1;
@@ -522,10 +522,10 @@ void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQu
 
     // If the quaternions are very close, use linear interpolation
     if (dot > 0.9995f) {
-        result->xyzw[0] = q0->xyzw[0] + t * (q1_temp.xyzw[0] - q0->xyzw[0]);
-        result->xyzw[1] = q0->xyzw[1] + t * (q1_temp.xyzw[1] - q0->xyzw[1]);
-        result->xyzw[2] = q0->xyzw[2] + t * (q1_temp.xyzw[2] - q0->xyzw[2]);
-        result->xyzw[3] = q0->xyzw[3] + t * (q1_temp.xyzw[3] - q0->xyzw[3]);
+        result->x = q0->x + t * (q1_temp.xyzw[0] - q0->x);
+        result->y = q0->y + t * (q1_temp.xyzw[1] - q0->y);
+        result->z = q0->z + t * (q1_temp.xyzw[2] - q0->z);
+        result->w = q0->w + t * (q1_temp.xyzw[3] - q0->w);
         return;
     }
 
@@ -538,10 +538,10 @@ void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQu
     float s1 = sinf(t * theta) / sin_theta;
 
     // Perform the interpolation
-    result->xyzw[0] = s0 * q0->xyzw[0] + s1 * q1_temp.xyzw[0];
-    result->xyzw[1] = s0 * q0->xyzw[1] + s1 * q1_temp.xyzw[1];
-    result->xyzw[2] = s0 * q0->xyzw[2] + s1 * q1_temp.xyzw[2];
-    result->xyzw[3] = s0 * q0->xyzw[3] + s1 * q1_temp.xyzw[3];
+    result->x = s0 * q0->x + s1 * q1_temp.xyzw[0];
+    result->y = s0 * q0->y + s1 * q1_temp.xyzw[1];
+    result->z = s0 * q0->z + s1 * q1_temp.xyzw[2];
+    result->w = s0 * q0->w + s1 * q1_temp.xyzw[3];
 }
 
 bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance);
@@ -741,10 +741,10 @@ void pp_quat_from_axis_angle(PPQuaternion* q, const PPVec3* axis, float angle) {
     float s = sinf(half);   // sin(θ/2)
     float c = cosf(half);   // cos(θ/2)
 
-    q->xyzw[0] = a.xyz[0] * s;   // axis.x * sin(θ/2)
-    q->xyzw[1] = a.xyz[1] * s;   // axis.y * sin(θ/2)
-    q->xyzw[2] = a.xyz[2] * s;   // axis.z * sin(θ/2)
-    q->xyzw[3] = c;         // cos(θ/2)
+    q->x = a.xyz[0] * s;   // axis.x * sin(θ/2)
+    q->y = a.xyz[1] * s;   // axis.y * sin(θ/2)
+    q->z = a.xyz[2] * s;   // axis.z * sin(θ/2)
+    q->w = c;         // cos(θ/2)
 
     pp_quat_normalize(q);
 }
