@@ -182,7 +182,9 @@ typedef struct _PPSphere {
 
 typedef struct _PPBox {
     PPBody body;
-    float whd[3]; // Width/height/depth
+    PPVec3 whd; // Width/height/depth
+
+    float radius;  // Used to shortcut collisions
 } PPBox;
 
 typedef struct _PPTriangle {
@@ -208,6 +210,7 @@ PPQuaternion* pp_quat_init(PPQuaternion* q);
 void pp_quat_between(const PPVec3* v0, const PPVec3* q1, PPQuaternion* result);
 void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQuaternion* result);
 PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source);
+float pp_quat_angle_between(const PPQuaternion* q0, const PPQuaternion* q1);
 
 void pp_physics_step(float t);
 bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance);
@@ -225,7 +228,9 @@ float pp_sphere_get_radius(const PPSphere* s);
 
 PPBox* pp_physics_create_box(float width, float height, float depth, const PPVec3* pos, float mass, BodyKind kind);
 void pp_physics_destroy_box(PPBox* s);
+float pp_box_get_width(const PPBox* b);
 float pp_box_get_height(const PPBox* b);
+float pp_box_get_depth(const PPBox* b);
 
 const PPBody* pp_physics_body_at(size_t i);
 size_t pp_physics_body_count();
@@ -421,6 +426,11 @@ void pp_quat_multiply(const PPQuaternion* q1, const PPQuaternion* q2, PPQuaterni
     tmp.xyzw[3] = q1->xyzw[3] * q2->xyzw[3] - q1->xyzw[0] * q2->xyzw[0] - q1->xyzw[1] * q2->xyzw[1] - q1->xyzw[2] * q2->xyzw[2];
 
     *result = tmp;
+}
+
+float pp_quat_angle_between(const PPQuaternion* q1, const PPQuaternion* q2) {
+    float dot = q1->w * q2->w + q1->x * q2->x + q1->y * q2->y + q1->z * q2->z;
+    return acosf(dot) * 2.0f;
 }
 
 void pp_quat_transform(const PPQuaternion* q, const PPVec3* v, PPVec3* ret) {
@@ -670,8 +680,6 @@ bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, P
     return true;
 }
 
-bool pp_sphere_set_bounce(PPSphere* s, float b);
-
 void pp_body_set_angular_velocity(PPBody* s, float x, float y, float z) {
     pp_vec3_set(&s->a_vel, x, y, z);
 }
@@ -708,8 +716,16 @@ void pp_body_get_forward(PPBody* s, PPVec3* f) {
     pp_quat_forward(&s->rot, f);
 }
 
+float pp_box_get_width(const PPBox* b) {
+    return b->whd.x;
+}
+
 float pp_box_get_height(const PPBox* b) {
-    return b->whd[1];
+    return b->whd.y;
+}
+
+float pp_box_get_depth(const PPBox* b) {
+    return b->whd.z;
 }
 
 float pp_sphere_get_radius(const PPSphere* s) {
@@ -826,9 +842,8 @@ PPBox* pp_box_init(PPBox* s, float width, float height, float depth, const PPVec
 
     pp_body_init(&s->body, pos, mass, kind);
 
-    s->whd[0] = width;
-    s->whd[1] = height;
-    s->whd[2] = depth;
+    pp_vec3_set(&s->whd, width, height, depth);
+    s->radius = pp_vec3_length(&s->whd);
 
     return s;
 }
@@ -855,7 +870,7 @@ void pp_body_set_position(PPBody *s, float x, float y, float z) {
 
 void pp_body_get_velocity_at_position(const PPBody* b, const PPVec3* p, PPVec3* ret) {
     PPVec3 rel_pos, local_rel_pos, a_vel_contrib;
-    pp_vec3_subtract(p, &b->pos, &rel_pos);
+    pp_vec3_sub(p, &b->pos, &rel_pos);
     pp_vec3_cross(&b->a_vel, &local_rel_pos, &a_vel_contrib);
     pp_vec3_add(&b->pos, &a_vel_contrib, ret);
 }
@@ -1235,9 +1250,9 @@ bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* cont
 
     PPVec3 axis[3];
     float half_lengths[3] = {
-        rhs->whd[0] * 0.5f,
-        rhs->whd[1] * 0.5f,
-        rhs->whd[2] * 0.5f,
+        rhs->whd.x * 0.5f,
+        rhs->whd.y * 0.5f,
+        rhs->whd.z * 0.5f,
     };
 
     // Rotate the box axis into world space
