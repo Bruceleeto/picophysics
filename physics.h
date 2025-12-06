@@ -298,47 +298,47 @@ static PPVec3 gravity = {.xyz = {0.0f, 0.0f, 0.0f}};
 static float gravity_magnitude = 0.0f;
 
 PPVec3* pp_vec3_init(PPVec3* v) {
-    v->xyz[0] = 0.0f;
-    v->xyz[1] = 0.0f;
-    v->xyz[2] = 0.0f;
+    v->x = 0.0f;
+    v->y = 0.0f;
+    v->z = 0.0f;
     return v;
 }
 
 PPVec3* pp_vec3_set(PPVec3* v, float x, float y, float z) {
-    v->xyz[0] = x;
-    v->xyz[1] = y;
-    v->xyz[2] = z;
+    v->x = x;
+    v->y = y;
+    v->z = z;
     return v;
 }
 
 PPVec3* pp_vec3_assign(PPVec3* target, const PPVec3* source) {
-    pp_vec3_set(target, source->xyz[0], source->xyz[1], source->xyz[2]);
+    pp_vec3_set(target, source->x, source->y, source->z);
     return target;
 }
 
 PPVec3* pp_vec3_add(const PPVec3* v1, const PPVec3* v2, PPVec3* out) {
-    out->xyz[0] = v1->xyz[0] + v2->xyz[0];
-    out->xyz[1] = v1->xyz[1] + v2->xyz[1];
-    out->xyz[2] = v1->xyz[2] + v2->xyz[2];
+    out->x = v1->x + v2->x;
+    out->y = v1->y + v2->y;
+    out->z = v1->z + v2->z;
     return out;
 }
 
 PPVec3* pp_vec3_sub(const PPVec3* v1, const PPVec3* v2, PPVec3* out) {
-    out->xyz[0] = v1->xyz[0] - v2->xyz[0];
-    out->xyz[1] = v1->xyz[1] - v2->xyz[1];
-    out->xyz[2] = v1->xyz[2] - v2->xyz[2];
+    out->x = v1->x - v2->x;
+    out->y = v1->y - v2->y;
+    out->z = v1->z - v2->z;
     return out;
 }
 
 PPVec3* pp_vec3_scale(const PPVec3* v1, float t, PPVec3* out) {
-    out->xyz[0] = v1->xyz[0] * t;
-    out->xyz[1] = v1->xyz[1] * t;
-    out->xyz[2] = v1->xyz[2] * t;
+    out->x = v1->x * t;
+    out->y = v1->y * t;
+    out->z = v1->z * t;
     return out;
 }
 
 float pp_vec3_length(const PPVec3* v1) {
-    return sqrtf(v1->xyz[0] * v1->xyz[0] + v1->xyz[1] * v1->xyz[1] + v1->xyz[2] * v1->xyz[2]);
+    return sqrtf(v1->x * v1->x + v1->y * v1->y + v1->z * v1->z);
 }
 
 float pp_vec3_dist(const PPVec3* v1, const PPVec3* v2) {
@@ -348,16 +348,16 @@ float pp_vec3_dist(const PPVec3* v1, const PPVec3* v2) {
 }
 
 PPVec3* pp_vec3_cross(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out) {
-    out->xyz[0] = v1->xyz[1] * v2->xyz[2] - v1->xyz[2] * v2->xyz[1];
-    out->xyz[1] = v1->xyz[2] * v2->xyz[0] - v1->xyz[0] * v2->xyz[2];
-    out->xyz[2] = v1->xyz[0] * v2->xyz[1] - v1->xyz[1] * v2->xyz[0];
+    out->x = v1->y * v2->z - v1->z * v2->y;
+    out->y = v1->z * v2->x - v1->x * v2->z;
+    out->z = v1->x * v2->y - v1->y * v2->x;
     return out;
 }
 
 float pp_vec3_dot(const PPVec3 *v1, const PPVec3 *v2) {
-    return v1->xyz[0] * v2->xyz[0] +
-           v1->xyz[1] * v2->xyz[1] +
-           v1->xyz[2] * v2->xyz[2];
+    return v1->x * v2->x +
+           v1->y * v2->y +
+           v1->z * v2->z;
 }
 
 bool pp_vec3_normalize(PPVec3 *v) {
@@ -365,9 +365,9 @@ bool pp_vec3_normalize(PPVec3 *v) {
 
     // Check for zero-length vector to avoid division by zero
     if (length > 0.0f) {
-        v->xyz[0] /= length;
-        v->xyz[1] /= length;
-        v->xyz[2] /= length;
+        v->x /= length;
+        v->y /= length;
+        v->z /= length;
         return true;
     } else {
         pp_vec3_init(v);
@@ -459,9 +459,9 @@ void pp_quat_forward(const PPQuaternion* q, PPVec3* out)
     float z = q->z;
     float w = q->w;
 
-    out->xyz[0] = 2.0f * (x * z + w * y);
-    out->xyz[1] = 2.0f * (y * z - w * x);
-    out->xyz[2] = 1.0f - 2.0f * (x * x + y * y);
+    out->x = 2.0f * (x * z + w * y);
+    out->y = 2.0f * (y * z - w * x);
+    out->z = 1.0f - 2.0f * (x * x + y * y);
 }
 
 void pp_quat_between(const PPVec3* v0, const PPVec3* v1, PPQuaternion* result) {
@@ -488,9 +488,9 @@ void pp_quat_between(const PPVec3* v0, const PPVec3* v1, PPQuaternion* result) {
 
     // Calculate the axis of rotation
     PPVec3 axis;
-    axis.xyz[0] = v0->xyz[1] * v1->xyz[2] - v0->xyz[2] * v1->xyz[1];
-    axis.xyz[1] = v0->xyz[2] * v1->xyz[0] - v0->xyz[0] * v1->xyz[2];
-    axis.xyz[2] = v0->xyz[0] * v1->xyz[1] - v0->xyz[1] * v1->xyz[0];
+    axis.xyz[0] = v0->y * v1->z - v0->z * v1->y;
+    axis.xyz[1] = v0->z * v1->x - v0->x * v1->z;
+    axis.xyz[2] = v0->x * v1->y - v0->y * v1->x;
 
     pp_vec3_normalize(&axis);
 
@@ -809,7 +809,7 @@ static void pp_body_init(PPBody* body, const PPVec3* pos, float mass, BodyKind k
     pp_vec3_init(&body->a_vel);
     pp_vec3_init(&body->a_acc);
     pp_quat_init(&body->rot);
-    pp_vec3_set(&body->pos, pos->xyz[0], pos->xyz[1], pos->xyz[2]);
+    pp_vec3_set(&body->pos, pos->x, pos->y, pos->z);
     body->kind = kind;
     body->mass = mass;
     body->inv_mass = 1.0f / mass;
