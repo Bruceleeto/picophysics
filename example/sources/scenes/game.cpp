@@ -141,13 +141,13 @@ bool ground_check(const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, co
 bool ball_car_collision(
     const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c)
 {
-    PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
-    PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
-    PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
+    // PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
+    // PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
+    // PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
 
-    PPVec3 vel;
-    pp_body_get_velocity_at_position(PP_BODY(car_ball_body), &c->p, &vel);
-    pp_body_add_force(PP_BODY(ball), vel.x, vel.y - 5, vel.z);
+    // PPVec3 vel;
+    // pp_body_get_velocity_at_position(PP_BODY(car_ball_body), &c->p, &vel);
+    // pp_body_add_force(PP_BODY(ball), vel.x, vel.y - 5, vel.z);
     return true;
 }
 

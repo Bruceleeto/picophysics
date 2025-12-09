@@ -341,6 +341,10 @@ float pp_vec3_length(const PPVec3* v1) {
     return sqrtf(v1->x * v1->x + v1->y * v1->y + v1->z * v1->z);
 }
 
+float pp_vec3_length_sq(const PPVec3* v1) {
+    return v1->x * v1->x + v1->y * v1->y + v1->z * v1->z;
+}
+
 float pp_vec3_dist(const PPVec3* v1, const PPVec3* v2) {
     PPVec3 tmp;
     pp_vec3_sub(v2, v1, &tmp);
@@ -954,9 +958,8 @@ bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callbac
     return false;
 }
 
-void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, const PPVec3* contact_point, const PPVec3* n, PPCollision* c) {
-    PPVec3 t;
-    c->dist = pp_vec3_length(pp_vec3_sub(contact_point, &lhs->body.pos, &t));
+void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, const PPVec3* contact_point, const PPVec3* n, PPCollision* c, float d) {
+    c->dist = d;
     pp_vec3_assign(&c->p, contact_point);
     pp_vec3_assign(&c->n, n);
 }
@@ -1241,7 +1244,10 @@ static inline bool flt_close(const float a, const float b) {
     return (a + FLT_EPSILON > b) && (a - FLT_EPSILON) < b;
 }
 
-bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* contact_point, PPVec3* n) {
+bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* contact_point, PPVec3* n, float* intersection) {
+    PPVec3 dir;
+    pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &dir);
+
     const PPVec3 bases[3] = {
         {1, 0, 0},
         {0, 1, 0},
@@ -1249,61 +1255,93 @@ bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* cont
     };
 
     PPVec3 axis[3];
-    float half_lengths[3] = {
-        rhs->whd.x * 0.5f,
-        rhs->whd.y * 0.5f,
-        rhs->whd.z * 0.5f,
-    };
-
     // Rotate the box axis into world space
     pp_quat_transform(&rhs->body.rot, &bases[0], &axis[0]);
     pp_quat_transform(&rhs->body.rot, &bases[1], &axis[1]);
     pp_quat_transform(&rhs->body.rot, &bases[2], &axis[2]);
 
-    PPVec3 distance_vec, closest_point;
-    pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &distance_vec);
-    pp_vec3_assign(&closest_point, &rhs->body.pos);
+    PPVec3 half_lengths;
+    pp_vec3_set(&half_lengths,
+        rhs->whd.x * 0.5f,
+        rhs->whd.y * 0.5f,
+        rhs->whd.z * 0.5f
+    );
+
+    PPVec3 distance;
 
     for(int i = 0; i < 3; ++i) {
-        float dist = pp_vec3_dot(&distance_vec, &axis[i]);
-        if(dist >= half_lengths[i]) {
-            dist = half_lengths[i];
-        } else if(dist <= -half_lengths[i]) {
-            dist = -half_lengths[i];
+        distance.xyz[i] = pp_vec3_dot(&dir, &axis[i]);
+        if(distance.xyz[i] > half_lengths.xyz[i]) {
+            distance.xyz[i] = half_lengths.xyz[i];
+        } else if (distance.xyz[i] < -half_lengths.xyz[i]) {
+            distance.xyz[i] = -half_lengths.xyz[i];
         }
+    }
 
-        PPVec3 tmp;
-        pp_vec3_scale(&axis[i], dist, &tmp);
-        pp_vec3_add(&closest_point, &tmp, &closest_point);
+    pp_vec3_init(contact_point);
+
+    for(int i = 0; i < 3; ++i) {
+        PPVec3 t;
+        pp_vec3_scale(&axis[i], distance.xyz[i], &t);
+        pp_vec3_add(contact_point, &t, contact_point);
     }
 
     PPVec3 diff;
-    pp_vec3_sub(&lhs->body.pos, &closest_point, &diff);
-    if(pp_vec3_length(&diff) <= lhs->radius) {
-        pp_vec3_assign(contact_point, &closest_point);
-
-        PPVec3 rel_point;
-        pp_vec3_sub(contact_point, &lhs->body.pos, &rel_point);
-        float d;
-        for(int i = 0; i < 3; ++i) {
-            d = pp_plane_distance(&axis[i], half_lengths[i], &rel_point);
-            if(flt_close(d, 0.0f)) {
-                pp_vec3_assign(n, &bases[i]);
-                return true;
-            }
-
-            d = pp_plane_distance(&axis[i], -half_lengths[i], &rel_point);
-            if(flt_close(d, 0.0f)) {
-                pp_vec3_set(n, -bases[i].x, -bases[i].y, -bases[i].z);
-                return true;
-            }
-        }
-
-        assert(true && "Couldn't find contact normal");
+    pp_vec3_sub(contact_point, &lhs->body.pos, &diff);
+    float dist_sq = pp_vec3_length_sq(&diff);
+    if(dist_sq < (lhs->radius * lhs->radius)) {
+        pp_vec3_assign(n, &diff);
+        pp_vec3_normalize(n);
+        *intersection = sqrtf(dist_sq) - lhs->radius;
         return true;
     }
 
     return false;
+
+    // PPVec3 distance_vec, closest_point;
+    // pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &distance_vec);
+    // pp_vec3_assign(&closest_point, &rhs->body.pos);
+
+    // for(int i = 0; i < 3; ++i) {
+    //     float dist = pp_vec3_dot(&distance_vec, &axis[i]);
+    //     if(dist >= half_lengths[i]) {
+    //         dist = half_lengths[i];
+    //     } else if(dist <= -half_lengths[i]) {
+    //         dist = -half_lengths[i];
+    //     }
+
+    //     PPVec3 tmp;
+    //     pp_vec3_scale(&axis[i], dist, &tmp);
+    //     pp_vec3_add(&closest_point, &tmp, &closest_point);
+    // }
+
+    // PPVec3 diff;
+    // pp_vec3_sub(&lhs->body.pos, &closest_point, &diff);
+    // if(pp_vec3_length(&diff) <= lhs->radius) {
+    //     pp_vec3_assign(contact_point, &closest_point);
+
+    //     PPVec3 rel_point;
+    //     pp_vec3_sub(contact_point, &lhs->body.pos, &rel_point);
+    //     float d;
+    //     for(int i = 0; i < 3; ++i) {
+    //         d = pp_plane_distance(&axis[i], half_lengths[i], &rel_point);
+    //         if(flt_close(d, 0.0f)) {
+    //             pp_vec3_assign(n, &bases[i]);
+    //             return true;
+    //         }
+
+    //         d = pp_plane_distance(&axis[i], -half_lengths[i], &rel_point);
+    //         if(flt_close(d, 0.0f)) {
+    //             pp_vec3_set(n, -bases[i].x, -bases[i].y, -bases[i].z);
+    //             return true;
+    //         }
+    //     }
+
+    //     assert(false && "Couldn't find contact normal");
+    //     return true;
+    // }
+
+    // return false;
 }
 
 void pp_physics_step(float t) {
@@ -1423,9 +1461,10 @@ void pp_physics_step(float t) {
                 PPSphere* sphere = (lhs_sphere) ? lhs_sphere : rhs_sphere;
                 PPBox* box = (lhs_box) ? lhs_box : rhs_box;
                 PPVec3 contact, n;
-                if(pp_sphere_box_intersect(sphere, box, &contact, &n)) {
+                float d;
+                if(pp_sphere_box_intersect(sphere, box, &contact, &n, &d)) {
                     PPCollision c;
-                    pp_fill_collision_info_sphere_box(sphere, box, &contact, &n, &c);
+                    pp_fill_collision_info_sphere_box(sphere, box, &contact, &n, &c, d);
 
                     bool respond = true;
                     const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
