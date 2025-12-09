@@ -1226,6 +1226,117 @@ static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPColl
     }
 }
 
+struct PPSimplex {
+    PPVec3 points[4];
+    std::size_t count;
+};
+
+void pp_find_furthest_point_sphere(const PPSphere* sphere, const PPVec3* direction, PPVec3* point) {
+    PPVec3 ndir;
+    pp_vec3_assign(&ndir, direction);
+    pp_vec3_normalize(&ndir);
+
+    pp_vec3_scale(&ndir, sphere->radius, &ndir);
+    pp_vec3_add(&sphere->body.pos, &ndir, point);
+}
+
+void pp_find_furthest_point_box(const PPBox* box, const PPVec3* direction, PPVec3* point) {
+    PPVec3 max_point;
+    float max_distance = -FLT_MAX;
+    float hw = box->whd.x * 0.5f;
+    float hh = box->whd.y * 0.5f;
+    float hd = box->whd.z * 0.5f;
+
+#define _CHECK(x, y, z) \
+    do { \
+        PPVec3 v; \
+        pp_vec3_set(&v, x, y, z);  \
+        float d = pp_vec3_dot(&v, direction); \
+        if(d > max_distance) { \
+            max_distance = d; \
+            pp_vec3_assign(&max_point, &v); \
+        } \
+    } while(0)
+
+    _CHECK(-hw, -hh, -hd);
+    _CHECK( hw, -hh, -hd);
+    _CHECK(-hw,  hh, -hd);
+    _CHECK( hw,  hh, -hd);
+    _CHECK(-hw, -hh, hd);
+    _CHECK( hw, -hh, hd);
+    _CHECK(-hw,  hh, hd);
+    _CHECK( hw,  hh, hd);
+
+#undef _CHECK
+}
+
+bool pp_gjk_support(const PPBody* b1, const PPBody* b2, const PPVec3* direction, PPVec3* out) {
+    if(b1->type == PP_OBJECT_TYPE_BOX && b2->type == PP_OBJECT_TYPE_BOX) {
+        PPVec3 reverse, first, second;
+        pp_vec3_scale(direction, -1.0f, &reverse);
+        pp_find_furthest_point_box(PP_BOX(b1), direction, &first);
+        pp_find_furthest_point_box(PP_BOX(b2), &reverse, &second);
+        pp_vec3_sub(&first, &second, out);
+        return true;
+    } else if(b1->type == PP_OBJECT_BOX && b2->type == PP_OBJECT_TYPE_SPHERE) {
+        PPVec3 reverse, first, second;
+        pp_vec3_scale(direction, -1.0f, &reverse);
+        pp_find_furthest_point_box(PP_BOX(b1), direction, &first);
+        pp_find_furthest_point_sphere(PP_SPHERE(b2), &reverse, &second);
+        pp_vec3_sub(&first, &second, out);
+        return true;
+    } else if(b1->type == PP_OBJECT_SPHERE && b2->type == PP_OBJECT_TYPE_BOX) {
+        PPVec3 reverse, first, second;
+        pp_vec3_scale(direction, -1.0f, &reverse);
+        pp_find_furthest_point_sphere(PP_SPHERE(b1), direction, &first);
+        pp_find_furthest_point_box(PP_BOX(b2), &reverse, &second);
+        pp_vec3_sub(&first, &second, out);
+        return true;
+    }
+
+    return false;
+}
+
+bool pp_gjk_collide(const PPBody* b1, const PPBody* b2, PPSimplex* result) {
+    // def GJK(A, B):
+    //  # Step 1: Find the optimal simplex.
+    //  d1 = randomDirectionVector()
+    //  sp1 = supportFunction(A, B, d1)
+    //  d2 = toOriginDirectionVector()
+    //  sp2 = supportFunction(A, B, d2)
+    //  d3 = normalDirectionVector(sp1, sp2)
+    //  sp3 = supportFunction(A, B, d3)
+    //  simplex = (sp1, sp2, sp3) # Simplex is defined as a set of vectors.
+    //  if (checkRegion(simplex)):
+    //   return True
+    //  else:
+    //   p1, p2 = getClosestEdge()
+    //   d4 = normalDirectionVector(p1, p2)
+    //   sp4 = supportFunction(A, B, d4)
+    //   simplex = (sp2, sp3, sp4)
+    //  # Step 2: Determine relevant Voronoi regions.
+    //  AC = A - C
+    //  BC = B - C
+    //  CO = origin - C # origin is a point vector.
+    //  RAC = tripleProduct(BC, AC, AC)
+    //  RBC = tripleProduct(AC, BC, BC)
+    //  # Step 3: Compute dot products to find which region contains origin.
+    //  if (dotProduct(RAC, CO) > 0:
+    //   return False
+    //  elif (dotProduct(RBC, CO) > 0:
+    //   return False
+    //  else:
+    //   return True
+    PPVec3 d[3]
+    PPVec3 s[3]
+    pp_vec3_set(&d[0], 1, 0, 0);  // Random start direction
+
+    pp_gjk_support(b1, b2, &d[0], &s[0]);
+
+
+}
+
+
 bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* contact_point) {
     const PPVec3 bases[3] = {
         {1, 0, 0},
