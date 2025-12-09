@@ -148,5 +148,13 @@ int main(int argc, char* argv[]) {
     CHECK(b1->body.pos.xyz[0] == -0.75f, "Unexpected position\n");  // Boxes don't move
     CHECK(s1->body.pos.xyz[0] == 0.75f, "Unexpected position\n");
 
+    pp_body_set_position(PP_BODY(b1), p2.x, p2.y, p2.z);
+    pp_body_set_position(PP_BODY(s1), p1.x, p1.y, p1.z);
+
+    pp_physics_step(1.0f / 60.0f);
+
+    CHECK(b1->body.pos.xyz[0] == 0.75f, "Unexpected position\n");  // Boxes don't move
+    CHECK(s1->body.pos.xyz[0] == -0.75f, "Unexpected position\n");
+
     return 0;
 }

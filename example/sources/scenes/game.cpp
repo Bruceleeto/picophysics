@@ -122,12 +122,12 @@ void define_stadium()
     pp_physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
 }
 
-bool dont_collide(const void *, const void *, BodyKind, BodyKind)
+bool dont_collide(const void *, const void *, BodyKind, BodyKind, const PPCollision *)
 {
     return false;
 }
 
-bool ground_check(const void *lhs, const void *rhs, BodyKind k0, BodyKind k1)
+bool ground_check(const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c)
 {
     // Abuse the user data pointer to store the grounded flag
     if (k0 == CAR_INNER_KIND) {
@@ -138,8 +138,24 @@ bool ground_check(const void *lhs, const void *rhs, BodyKind k0, BodyKind k1)
     return true;
 }
 
+bool ball_car_collision(
+    const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c)
+{
+    // PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
+    // PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
+    // PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
+
+    // PPVec3 vel;
+    // pp_body_get_velocity_at_position(PP_BODY(car_ball_body), &c->p, &vel);
+    // pp_body_add_force(PP_BODY(ball), vel.x, vel.y - 5, vel.z);
+    return true;
+}
+
 void rotate_to_direction(PPBox *sphere, const PPVec3 *target_forward, float dt)
 {
+    // 720 degrees a second
+    const float rot_rate_in_radians = (M_PI * 2.0f) * 2.0f;
+
     PPVec3 forward;
     pp_vec3_set(&forward, 0, 0, -1);
 
@@ -153,6 +169,7 @@ void GameScene::on_load() {
     pp_physics_collision_map_add(CAR_INNER_KIND, BALL_KIND, &dont_collide);
     pp_physics_collision_map_add(CAR_BODY_KIND, ENV_FLOOR_KIND, &dont_collide);
     pp_physics_collision_map_add(CAR_INNER_KIND, ENV_FLOOR_KIND, &ground_check);
+    pp_physics_collision_map_add(CAR_BODY_KIND, BALL_KIND, &ball_car_collision);
 
     auto car_mesh2 = assets->load_mesh("assets/car/sedan-sports.obj");
     float cs = 1.0f / car_mesh2->aabb().max_dimension();
@@ -168,6 +185,8 @@ void GameScene::on_load() {
                                                   &pos,
                                                   car_mesh2->aabb().height() / 2,
                                                   CAR_INNER_KIND);
+    pp_body_set_user_data(PP_BODY(cars_[0].body), cars_[0].roll_body);
+
     pp_body_lock_axis(PP_BODY(cars_[0].body), PP_AXIS_LOCK_PITCH_AND_ROLL);
     pp_body_set_angular_damping(PP_BODY(cars_[0].body), 0.25f);
 
