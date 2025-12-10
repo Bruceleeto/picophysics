@@ -1245,6 +1245,126 @@ struct PPSimplex {
     std::size_t count;
 };
 
+bool pp_simplex_push(PPSimplex* simplex, const PPVec3* point) {
+    if(count >= 4) {
+        return false;
+    }
+
+    pp_vec3_set(&simplex->points[simplex->count++], point->x, point->y, point->z);
+    return true;
+}
+
+void pp_simplex_replace(PPSimplex* simplex, const PPVec3* point) {
+    simplex->count = 1;
+    pp_vec3_assign(&simplex->points[0], point);
+}
+
+bool pp_simplex_next_line(PPSimplex* simplex, PPVec3* direction) {
+    PPVec3 ab, ao;
+    pp_vec3_sub(&simplex->points[1], &simplex->points[0], &ab);
+    pp_vec3_scale(&simplex->points[0], -1.0f, &ao);
+    if(pp_vec3_dot(&ab, &ao) > 0) {
+        pp_vec3_cross(&ab, &ao, direction);
+        pp_vec3_cross(direction, &ab, direction);
+    } else {
+        pp_simplex_replace(simplex, &simplex->points[0]);
+        pp_vec3_assign(direction, &ao);
+    }
+}
+
+bool pp_simplex_next_triangle(PPSimplex* simplex, PPVec3* direction) {
+    PPVec3 ab, ac, ao, abc;
+    pp_vec3_sub(&simplex->points[1], &simplex->points[0], &ab);
+    pp_vec3_sub(&simplex->points[2], &simplex->points[0], &ac);
+    pp_vec3_scale(&simplex->points[0], -1.0f, &ao);
+    pp_vec3_cross(&ab, &ac, &abc);
+
+    PPVec3 n;
+    pp_vec3_cross(&abc, &ac, &n);
+    if(pp_vec3_dot(&n, &ao) > 0) {
+        if(pp_vec3_dot(&ac, &ao) > 0) {
+            pp_simplex_replace(simplex, &a);
+            pp_simplex_push(simplex, &c);
+
+            pp_vec3_cross(&ac, &ao, direction);
+            pp_vec3_cross(direction, &ac, direction);
+        } else {
+            // FIXME: Should we replace the simplex here, or copy?
+            pp_simplex_replace(simplex, &a);
+            pp_simplex_push(simplex, &b);
+            return pp_simplex_next_line(simplex, direction);
+        }
+    } else {
+        pp_vec3_cross(&ab, &abc, n);
+        if(pp_vec3_dot(&n, &ao) > 0) {
+            pp_simplex_replace(simplex, &a);
+            pp_simplex_push(simplex, &b);
+            return pp_simplex_next_line(simplex, direction);
+        } else {
+            if(pp_vec3_dot(&abc, &ao) > 0) {
+                pp_vec3_assign(direction, &abc);
+            } else {
+                pp_simplex_replace(simplex, &a);
+                pp_simplex_push(simplex, &c);
+                pp_simplex_push(simplex, &b);
+                pp_vec3_scale(&abc, -1.0f, direction);
+            }
+        }
+    }
+
+    return false;
+}
+
+bool pp_simplex_next_tetrahedron(PPSimplex* simplex, PPVec3* direction) {
+    assert(simplex->count == 4);
+
+    PPVec3 ab, ac, ad, ao;
+    PPVec3 abc, acd, adb;
+
+    pp_vec3_sub(&simplex->points[1], &simplex->points[0], &ab);
+    pp_vec3_sub(&simplex->points[2], &simplex->points[0], &ac);
+    pp_vec3_sub(&simplex->points[3], &simplex->points[0], &ad);
+    pp_vec3_scale(&simplex->points[0], -1.0f, &ao);
+
+    pp_vec3_cross(&ab, &ac, &abc);
+    if(pp_vec3_dot(&abc, &ao) > 0) {
+        pp_simplex_replace(simplex, &a);
+        pp_simplex_push(simplex, &b);
+        pp_simplex_push(simplex, &c);
+        return pp_simplex_next_triangle(simplex, direction);
+    }
+
+    pp_vec3_cross(&ac, &ad, &acd);
+    if(pp_vec3_dot(&acd, &ao) > 0) {
+        pp_simplex_replace(simplex, &a);
+        pp_simplex_push(simplex, &c);
+        pp_simplex_push(simplex, &d);
+        return pp_simplex_next_triangle(simplex, direction);
+    }
+
+    pp_vec3_cross(&ad, &ab, &adb);
+    if(pp_vec3_dot(&adb, &ao) > 0) {
+        pp_simplex_replace(simplex, &a);
+        pp_simplex_push(simplex, &d);
+        pp_simplex_push(simplex, &b);
+        return pp_simplex_next_triangle(simplex, direction);
+    }
+
+    return true;
+}
+
+bool pp_simplex_next(PPSimplex* simplex, PPVec3* direction) {
+    if(simplex->count == 2) {
+        return pp_simplex_line(simplex, direction);
+    } else if(simplex->count == 3) {
+        return pp_simplex_triangle(simplex, direction);
+    } else if(simplex->count == 4) {
+        return pp_simplex_tetrahedron(simplex, direction);
+    }
+
+    return false;
+}
+
 void pp_find_furthest_point_sphere(const PPSphere* sphere, const PPVec3* direction, PPVec3* point) {
     PPVec3 ndir;
     pp_vec3_assign(&ndir, direction);
@@ -1312,98 +1432,37 @@ bool pp_gjk_support(const PPBody* b1, const PPBody* b2, const PPVec3* direction,
 }
 
 bool pp_gjk_collide(const PPBody* b1, const PPBody* b2, PPSimplex* result) {
-    // def GJK(A, B):
-    //  # Step 1: Find the optimal simplex.
-    //  d1 = randomDirectionVector()
-    //  sp1 = supportFunction(A, B, d1)
-    //  d2 = toOriginDirectionVector()
-    //  sp2 = supportFunction(A, B, d2)
-    //  d3 = normalDirectionVector(sp1, sp2)
-    //  sp3 = supportFunction(A, B, d3)
-    //  simplex = (sp1, sp2, sp3) # Simplex is defined as a set of vectors.
-    //  if (checkRegion(simplex)):
-    //   return True
-    //  else:
-    //   p1, p2 = getClosestEdge()
-    //   d4 = normalDirectionVector(p1, p2)
-    //   sp4 = supportFunction(A, B, d4)
-    //   simplex = (sp2, sp3, sp4)
-    //  # Step 2: Determine relevant Voronoi regions.
-    //  AC = A - C
-    //  BC = B - C
-    //  CO = origin - C # origin is a point vector.
-    //  RAC = tripleProduct(BC, AC, AC)
-    //  RBC = tripleProduct(AC, BC, BC)
-    //  # Step 3: Compute dot products to find which region contains origin.
-    //  if (dotProduct(RAC, CO) > 0:
-    //   return False
-    //  elif (dotProduct(RBC, CO) > 0:
-    //   return False
-    //  else:
-    //   return True
-    PPVec3 d[3]
-    PPVec3 s[3]
-    pp_vec3_set(&d[0], 1, 0, 0);  // Random start direction
+    const PPVec3 x = {.xyz = {1, 0, 0}};
+    PPVec3 support;
+    pp_gjk_support(b1, b2, &x, &support);
+    pp_simplex_push(&support);
 
-    pp_gjk_support(b1, b2, &d[0], &s[0]);
+    PPVec3 direction;
+    pp_vec3_scale(&support, -1.0f, &direction);
 
+    while(true) {
+        pp_gjk_support(b1, b2, &direction, &support);
+        if(pp_vec3_dot(&support, &direction) <= 0) {
+            return false;
+        }
 
+        pp_simplex_push(&support);
+
+        if(pp_simplex_next(result, &direction)) {
+            return true;
+        }
+    }
+
+    return false;
 }
-
 
 static inline bool flt_close(const float a, const float b) {
     return (a + FLT_EPSILON > b) && (a - FLT_EPSILON) < b;
 }
 
 bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* contact_point, PPVec3* n, float* intersection) {
-    PPVec3 dir;
-    pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &dir);
-
-    const PPVec3 bases[3] = {
-        {1, 0, 0},
-        {0, 1, 0},
-        {0, 0, 1}
-    };
-
-    PPVec3 axis[3];
-    // Rotate the box axis into world space
-    pp_quat_transform(&rhs->body.rot, &bases[0], &axis[0]);
-    pp_quat_transform(&rhs->body.rot, &bases[1], &axis[1]);
-    pp_quat_transform(&rhs->body.rot, &bases[2], &axis[2]);
-
-    PPVec3 half_lengths;
-    pp_vec3_set(&half_lengths,
-        rhs->whd.x * 0.5f,
-        rhs->whd.y * 0.5f,
-        rhs->whd.z * 0.5f
-    );
-
-    PPVec3 distance;
-
-    for(int i = 0; i < 3; ++i) {
-        distance.xyz[i] = pp_vec3_dot(&dir, &axis[i]);
-        if(distance.xyz[i] > half_lengths.xyz[i]) {
-            distance.xyz[i] = half_lengths.xyz[i];
-        } else if (distance.xyz[i] < -half_lengths.xyz[i]) {
-            distance.xyz[i] = -half_lengths.xyz[i];
-        }
-    }
-
-    pp_vec3_init(contact_point);
-
-    for(int i = 0; i < 3; ++i) {
-        PPVec3 t;
-        pp_vec3_scale(&axis[i], distance.xyz[i], &t);
-        pp_vec3_add(contact_point, &t, contact_point);
-    }
-
-    PPVec3 diff;
-    pp_vec3_sub(contact_point, &lhs->body.pos, &diff);
-    float dist_sq = pp_vec3_length_sq(&diff);
-    if(dist_sq < (lhs->radius * lhs->radius)) {
-        pp_vec3_assign(n, &diff);
-        pp_vec3_normalize(n);
-        *intersection = sqrtf(dist_sq) - lhs->radius;
+    if(pp_gjk_collide(PP_BODY(lhs), PP_BODY(rhs))) {
+        fprintf(stderr, "Collided\n");
         return true;
     }
 
