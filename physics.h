@@ -1262,9 +1262,39 @@ bool pp_simplex_push(PPSimplex* simplex, const PPVec3* point) {
     return true;
 }
 
-void pp_simplex_replace(PPSimplex* simplex, const PPVec3* point) {
+void pp_simplex_replace1(PPSimplex* simplex, const PPVec3* point) {
     simplex->count = 1;
     pp_vec3_assign(&simplex->points[0], point);
+}
+
+void pp_simplex_replace2(PPSimplex* simplex, const PPVec3* p0, const PPVec3* p1) {
+    simplex->count = 2;
+
+    // Temp variables are necessary as p0 or p1 may be
+    // the points we're replacing
+    PPVec3 t0, t1;
+    pp_vec3_assign(&t0, p0);
+    pp_vec3_assign(&t1, p1);
+
+    pp_vec3_assign(&simplex->points[0], &t0);
+    pp_vec3_assign(&simplex->points[1], &t1);
+}
+
+void pp_simplex_replace3(PPSimplex* simplex, const PPVec3* p0, const PPVec3* p1, const PPVec3* p2) {
+    // FIXME: This needs performance testing. There are probably faster ways than just creating
+    // 3 temporary variables
+    simplex->count = 3;
+
+    // Temp variables are necessary as p0 or p1 may be
+    // the points we're replacing
+    PPVec3 t0, t1, t2;
+    pp_vec3_assign(&t0, p0);
+    pp_vec3_assign(&t1, p1);
+    pp_vec3_assign(&t2, p2);
+
+    pp_vec3_assign(&simplex->points[0], &t0);
+    pp_vec3_assign(&simplex->points[1], &t1);
+    pp_vec3_assign(&simplex->points[2], &t2);
 }
 
 inline bool pp_same_direction(const PPVec3* direction, const PPVec3* ao) {
@@ -1280,7 +1310,7 @@ bool pp_simplex_next_line(PPSimplex* simplex, PPVec3* direction) {
         pp_vec3_cross(&ab, &ao, &t);
         pp_vec3_cross(&t, &ab, direction);
     } else {
-        pp_simplex_replace(simplex, &simplex->points[0]);
+        pp_simplex_replace1(simplex, &simplex->points[0]);
         pp_vec3_assign(direction, &ao);
     }
 
@@ -1303,31 +1333,25 @@ bool pp_simplex_next_triangle(PPSimplex* simplex, PPVec3* direction) {
     pp_vec3_cross(&abc, &ac, &n);
     if(pp_same_direction(&n, &ao)) {
         if(pp_same_direction(&ac, &ao)) {
-            pp_simplex_replace(simplex, a);
-            pp_simplex_push(simplex, c);
+            pp_simplex_replace2(simplex, a, c);
 
             PPVec3 t;
             pp_vec3_cross(&ac, &ao, &t);
             pp_vec3_cross(&t, &ac, direction);
         } else {
-            // FIXME: Should we replace the simplex here, or copy?
-            pp_simplex_replace(simplex, a);
-            pp_simplex_push(simplex, b);
+            pp_simplex_replace2(simplex, a, b);
             return pp_simplex_next_line(simplex, direction);
         }
     } else {
         pp_vec3_cross(&ab, &abc, &n);
         if(pp_same_direction(&n, &ao)) {
-            pp_simplex_replace(simplex, a);
-            pp_simplex_push(simplex, b);
+            pp_simplex_replace2(simplex, a, b);
             return pp_simplex_next_line(simplex, direction);
         } else {
             if(pp_same_direction(&abc, &ao)) {
                 pp_vec3_assign(direction, &abc);
             } else {
-                pp_simplex_replace(simplex, a);
-                pp_simplex_push(simplex, c);
-                pp_simplex_push(simplex, b);
+                pp_simplex_replace3(simplex, a, c, b);
                 pp_vec3_scale(&abc, -1.0f, direction);
             }
         }
@@ -1354,25 +1378,20 @@ bool pp_simplex_next_tetrahedron(PPSimplex* simplex, PPVec3* direction) {
 
     pp_vec3_cross(&ab, &ac, &abc);
     if(pp_same_direction(&abc, &ao)) {
-        pp_simplex_replace(simplex, a);
-        pp_simplex_push(simplex, b);
-        pp_simplex_push(simplex, c);
+        // FIXME: this is just a size reduction. Potential optimisation.
+        pp_simplex_replace3(simplex, a, b, c);
         return pp_simplex_next_triangle(simplex, direction);
     }
 
     pp_vec3_cross(&ac, &ad, &acd);
     if(pp_same_direction(&acd, &ao)) {
-        pp_simplex_replace(simplex, a);
-        pp_simplex_push(simplex, c);
-        pp_simplex_push(simplex, d);
+        pp_simplex_replace3(simplex, a, c, d);
         return pp_simplex_next_triangle(simplex, direction);
     }
 
     pp_vec3_cross(&ad, &ab, &adb);
     if(pp_same_direction(&adb, &ao)) {
-        pp_simplex_replace(simplex, a);
-        pp_simplex_push(simplex, d);
-        pp_simplex_push(simplex, b);
+        pp_simplex_replace3(simplex, a, d, b);
         return pp_simplex_next_triangle(simplex, direction);
     }
 
