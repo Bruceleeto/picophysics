@@ -1250,10 +1250,43 @@ static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPColl
     }
 }
 
+#define MAX_SIMPLEX_POINTS 64
+
 typedef struct _PPSimplex {
-    PPVec3 points[4];
+    // We store plenty of room for extra vertices so we can expand the simplex
+    // into a polytope when passing it into the EPA algorithm.
+    PPVec3 points[MAX_SIMPLEX_POINTS];
     size_t count;
 } PPSimplex;
+
+typedef struct _PPPolytopeFace {
+    union {
+        struct {
+            uint8_t a;
+            uint8_t b;
+            uint8_t c;
+        };
+        uint8_t abc[3];
+    };
+    PPVec3 n;
+    float d;
+} PPPolytopeFace;
+
+typedef struct _PPPolytopeEdge {
+    uint8_t a;
+    uint8_t b;
+} PPPolytopeEdge;
+
+#define MAX_POLYTOPE_FACES 64
+
+typedef struct _PPPolytope {
+    PPSimplex* simplex;
+    PPPolytopeFace faces[MAX_POLYTOPE_FACES];
+    size_t face_count;
+
+    PPPolytopeEdge edges[32 * 3];
+    size_t edge_count;
+} PPPolytope;
 
 static inline bool pp_same_direction(const PPVec3* direction, const PPVec3* ao) {
     return pp_vec3_dot(direction, ao) > 0.0f;
@@ -1265,11 +1298,7 @@ PPSimplex* pp_simplex_init(PPSimplex* s) {
 }
 
 bool pp_simplex_push(PPSimplex* simplex, const PPVec3* point) {
-    assert(simplex->count < 4);
-
-    if(simplex->count >= 4) {
-        return false;
-    }
+    assert(simplex->count < MAX_SIMPLEX_POINTS - 1);
 
     pp_vec3_set(&simplex->points[simplex->count++], point->x, point->y, point->z);
     return true;
@@ -1536,6 +1565,144 @@ bool pp_gjk_collide(const PPBody* b1, const PPBody* b2, PPSimplex* simplex) {
     return false;
 }
 
+void pp_polytope_clear_edges(PPPolytope* polytope) {
+    polytope->edge_count = 0;
+}
+
+void pp_polytope_push_edge(PPPolytope* polytope, uint8_t a, uint8_t b) {
+    polytope->edges[polytope->edge_count].a = a;
+    polytope->edges[polytope->edge_count++].b = b;
+}
+
+bool pp_polytope_contains_edge(const PPPolytope* polytope, uint8_t a, uint8_t b) {
+    for(size_t i = 0; i < polytope->edge_count; ++i) {
+        if((polytope->edges[i].a == a && polytope->edges[i].b == b) ||(polytope->edges[i].a == b && polytope->edges[i].b == a)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void pp_polytope_push_face(PPPolytope* polytope, uint8_t a, uint8_t b, uint8_t c) {
+    assert(polytope->face_count < MAX_POLYTOPE_FACES - 1);
+
+    polytope->faces[polytope->face_count].a = a;
+    polytope->faces[polytope->face_count].b = b;
+    polytope->faces[polytope->face_count++].c = c;
+}
+
+size_t pp_polytope_calc_face_normals(PPPolytope* polytope, size_t first_face) {
+    PPVec3 ab, ac;
+
+    size_t min_triangle = 0;
+    float min_distance = FLT_MAX;
+
+    for(size_t i = first_face; i < polytope->face_count; ++i) {
+        PPVec3* a = pp_simplex_at(polytope->simplex, polytope->faces[i].a);
+        PPVec3* b = pp_simplex_at(polytope->simplex, polytope->faces[i].b);
+        PPVec3* c = pp_simplex_at(polytope->simplex, polytope->faces[i].c);
+
+        pp_vec3_sub(b, a, &ab);
+        pp_vec3_sub(c, a, &ac);
+        pp_vec3_cross(&ab, &ac, &polytope->faces[i].n);
+        pp_vec3_normalize(&polytope->faces[i].n);
+
+        polytope->faces[i].d = pp_vec3_dot(&polytope->faces[i].n, a);
+        if(polytope->faces[i].d < 0) {
+            pp_vec3_neg(&polytope->faces[i].n, &polytope->faces[i].n);
+            polytope->faces[i].d *= -1.0f;
+        }
+
+        if(polytope->faces[i].d < min_distance) {
+            min_distance = polytope->faces[i].d;
+            min_triangle = i;
+        }
+    }
+
+    return min_triangle;
+}
+
+void pp_polytope_erase_face(PPPolytope* polytope, size_t face_index) {
+    *(polytope->faces + face_index) = *(polytope->faces + (polytope->face_count - 1));
+    polytope->face_count--;
+}
+
+void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n, float* intersection) {
+    PPPolytope polytope = {
+        .simplex = simplex,
+        .faces = {{.abc={0, 1, 2}}, {.abc={0, 3, 1}}, {.abc={0, 2, 3}}, {.abc={1, 3, 2}}},
+        .face_count = 4,
+        .edge_count = 0
+    };
+
+    size_t min_face = pp_polytope_calc_face_normals(&polytope, 0);
+
+    PPVec3* min_normal = NULL;
+    float min_distance = FLT_MAX;
+    while(min_distance == FLT_MAX) {
+        min_normal = &polytope.faces[min_face].n;
+        min_distance = polytope.faces[min_face].d;
+
+        PPVec3 support;
+        float s_dist;
+        pp_gjk_support(lhs, rhs, min_normal, &support);
+        s_dist = pp_vec3_dot(min_normal, &support);
+        if(fabs(s_dist - min_distance) > 0.001f) {
+            min_distance = FLT_MAX;
+
+            pp_polytope_clear_edges(&polytope);
+
+            for(size_t i = 0; i < polytope.face_count; ++i) {
+                PPVec3 dir;
+                pp_vec3_sub(&support, pp_simplex_at(polytope.simplex, polytope.faces[i].a), &dir);
+
+                if (pp_same_direction(&polytope.faces[i].n, &dir)) {
+                    if(!pp_polytope_contains_edge(&polytope, polytope.faces[i].a, polytope.faces[i].b)) {
+                        pp_polytope_push_edge(&polytope, polytope.faces[i].a, polytope.faces[i].b);
+                    }
+
+                    if(!pp_polytope_contains_edge(&polytope, polytope.faces[i].b, polytope.faces[i].c)) {
+                        pp_polytope_push_edge(&polytope, polytope.faces[i].b, polytope.faces[i].c);
+                    }
+
+                    if(!pp_polytope_contains_edge(&polytope, polytope.faces[i].c, polytope.faces[i].a)) {
+                        pp_polytope_push_edge(&polytope, polytope.faces[i].c, polytope.faces[i].a);
+                    }
+
+                    pp_polytope_erase_face(&polytope, i);
+                    --i;
+                }
+            }
+
+            size_t new_face_index = polytope.face_count;
+
+            for(size_t i = 0; i < polytope.edge_count; ++i) {
+                pp_polytope_push_face(&polytope, polytope.edges[i].a, polytope.edges[i].b, polytope.simplex->count);
+            }
+
+            pp_simplex_push(polytope.simplex, &support);
+            size_t new_min_face = pp_polytope_calc_face_normals(&polytope, new_face_index);
+
+            float old_min_distance = FLT_MAX;
+
+            for(size_t i = 0; i < new_face_index; ++i) {
+                if(polytope.faces[i].d < old_min_distance) {
+                    old_min_distance = polytope.faces[i].d;
+                    min_face = i;
+                }
+            }
+
+            if(polytope.faces[new_min_face].d < old_min_distance) {
+                min_face = new_min_face;
+            }
+        }
+    }
+
+    pp_vec3_assign(n, min_normal);
+    *intersection = min_distance + 0.001f;
+}
+
 static inline bool flt_close(const float a, const float b) {
     return (a + FLT_EPSILON > b) && (a - FLT_EPSILON) < b;
 }
@@ -1543,7 +1710,7 @@ static inline bool flt_close(const float a, const float b) {
 bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* contact_point, PPVec3* n, float* intersection) {
     PPSimplex simplex;
     if(pp_gjk_collide(PP_BODY(lhs), PP_BODY(rhs), pp_simplex_init(&simplex))) {
-        fprintf(stderr, "%u Collided\n", time(NULL));
+        pp_epa(&simplex, PP_BODY(lhs), PP_BODY(rhs), n, intersection);
         return true;
     }
 

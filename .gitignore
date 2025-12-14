@@ -3,3 +3,8 @@ example/libraries*
 example/tools*
 example/assets/simulant*
 example/package*
+examples/intersections/build*
+examples/intersections/libraries*
+examples/intersections/tools*
+examples/intersections/assets/simulant*
+examples/intersections/package*
