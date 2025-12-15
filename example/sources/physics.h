@@ -289,7 +289,8 @@ static int tri_count = 0;
 static struct _PPCollisionMapEntry {
     BodyKind kind1;
     BodyKind kind2;
-    bool (*collision_callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c);
+    void* user_data;
+    bool (*collision_callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c, const void*);
 } collision_map[32];
 
 static int collision_map_count = 0;
@@ -956,11 +957,12 @@ const struct _PPCollisionMapEntry* pp_physics_collision_map_search(BodyKind kind
     return NULL;
 }
 
-bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c)) {
+bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, void* user_data, bool (*callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c, const void*)) {
     if(!pp_physics_collision_map_search(kind1, kind2)) {
         struct _PPCollisionMapEntry* entry = &collision_map[collision_map_count++];
         entry->kind1 = kind1;
         entry->kind2 = kind2;
+        entry->user_data = user_data;
         entry->collision_callback = callback;
         return true;
     }
@@ -1821,7 +1823,7 @@ void pp_physics_step(float t) {
                     bool respond = true;
                     const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
                     if (cb) {
-                        respond = cb->collision_callback(lhs_sphere, rhs_sphere, lhs_body->kind, rhs_body->kind, &c);
+                        respond = cb->collision_callback(lhs_sphere, rhs_sphere, lhs_body->kind, rhs_body->kind, &c, cb->user_data);
                     }
 
                     if (respond) {
@@ -1842,7 +1844,7 @@ void pp_physics_step(float t) {
                     bool respond = true;
                     const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
                     if (cb) {
-                        respond = cb->collision_callback(sphere, box, sphere->body.kind, box->body.kind, &c);
+                        respond = cb->collision_callback(sphere, box, sphere->body.kind, box->body.kind, &c, cb->user_data);
                     }
 
                     if (respond) {
@@ -1868,7 +1870,7 @@ void pp_physics_step(float t) {
                         const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
 
                         if(cb) {
-                            respond = cb->collision_callback(lhs_sphere, tri, lhs_body->kind, tri->kind, &c);
+                            respond = cb->collision_callback(lhs_sphere, tri, lhs_body->kind, tri->kind, &c, cb->user_data);
                         }
 
                         if(respond) {
