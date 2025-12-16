@@ -1301,13 +1301,18 @@ PPSimplex* pp_simplex_init(PPSimplex* s) {
 bool pp_simplex_push(PPSimplex* simplex, const PPVec3* point) {
     assert(simplex->count < 4);
 
-    pp_vec3_set(&simplex->points[simplex->count++], point->x, point->y, point->z);
+    pp_vec3_assign(&simplex->points[3], &simplex->points[2]);
+    pp_vec3_assign(&simplex->points[2], &simplex->points[1]);
+    pp_vec3_assign(&simplex->points[1], &simplex->points[0]);
+    pp_vec3_set(&simplex->points[0], point->x, point->y, point->z);
+    simplex->count++;
+
     return true;
 }
 
 PPVec3* pp_simplex_at(PPSimplex* simplex, size_t i) {
     assert(i < simplex->count);
-    return &simplex->points[simplex->count - i - 1];
+    return &simplex->points[i];
 }
 
 void pp_simplex_replace1(PPSimplex* simplex, const PPVec3* point) {
@@ -1325,8 +1330,8 @@ void pp_simplex_replace2(PPSimplex* simplex, const PPVec3* p0, const PPVec3* p1)
     pp_vec3_assign(&t1, p1);
 
     // Reverse order, the "front" is the last thing
-    pp_vec3_assign(&simplex->points[1], &t0);
-    pp_vec3_assign(&simplex->points[0], &t1);
+    pp_vec3_assign(&simplex->points[0], &t0);
+    pp_vec3_assign(&simplex->points[1], &t1);
 }
 
 void pp_simplex_replace3(PPSimplex* simplex, const PPVec3* p0, const PPVec3* p1, const PPVec3* p2) {
@@ -1342,9 +1347,9 @@ void pp_simplex_replace3(PPSimplex* simplex, const PPVec3* p0, const PPVec3* p1,
     pp_vec3_assign(&t2, p2);
 
     // Reverse order, the "front" is the last thing
-    pp_vec3_assign(&simplex->points[2], &t0);
+    pp_vec3_assign(&simplex->points[0], &t0);
     pp_vec3_assign(&simplex->points[1], &t1);
-    pp_vec3_assign(&simplex->points[0], &t2);
+    pp_vec3_assign(&simplex->points[2], &t2);
 }
 
 bool pp_simplex_next_line(PPSimplex* simplex, PPVec3* direction) {
@@ -1616,6 +1621,7 @@ size_t pp_polytope_calc_face_normals(PPPolytope* polytope, size_t first_face) {
 #else
         pp_vec3_normalize(&polytope->faces[i].n);
 #endif
+
         polytope->faces[i].d = pp_vec3_dot(&polytope->faces[i].n, a);
         if(polytope->faces[i].d < 0) {
             pp_vec3_neg(&polytope->faces[i].n, &polytope->faces[i].n);
@@ -1632,7 +1638,10 @@ size_t pp_polytope_calc_face_normals(PPPolytope* polytope, size_t first_face) {
 }
 
 void pp_polytope_erase_face(PPPolytope* polytope, size_t face_index) {
-    *(polytope->faces + face_index) = *(polytope->faces + (polytope->face_count - 1));
+    if(face_index != polytope->face_count - 1) {
+        memcpy(&polytope->faces[face_index], &polytope->faces[polytope->face_count - 1], sizeof(PPPolytopeFace));
+    }
+
     polytope->face_count--;
 }
 

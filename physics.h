@@ -1252,12 +1252,8 @@ static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPColl
     }
 }
 
-#define MAX_SIMPLEX_POINTS 64
-
 typedef struct _PPSimplex {
-    // We store plenty of room for extra vertices so we can expand the simplex
-    // into a polytope when passing it into the EPA algorithm.
-    PPVec3 points[MAX_SIMPLEX_POINTS];
+    PPVec3 points[4];
     size_t count;
 } PPSimplex;
 
@@ -1280,9 +1276,12 @@ typedef struct _PPPolytopeEdge {
 } PPPolytopeEdge;
 
 #define MAX_POLYTOPE_FACES 64
+#define MAX_POLYTOPE_POINTS 64
 
 typedef struct _PPPolytope {
-    PPSimplex* simplex;
+    PPVec3 points[MAX_POLYTOPE_POINTS];
+    size_t point_count;
+
     PPPolytopeFace faces[MAX_POLYTOPE_FACES];
     size_t face_count;
 
@@ -1300,7 +1299,7 @@ PPSimplex* pp_simplex_init(PPSimplex* s) {
 }
 
 bool pp_simplex_push(PPSimplex* simplex, const PPVec3* point) {
-    assert(simplex->count < MAX_SIMPLEX_POINTS - 1);
+    assert(simplex->count < 4);
 
     pp_vec3_set(&simplex->points[simplex->count++], point->x, point->y, point->z);
     return true;
@@ -1492,7 +1491,6 @@ void pp_find_furthest_point_box(const PPBox* box, const PPVec3* direction, PPVec
         }
     }
     pp_vec3_add(&box->body.pos, &support_point, point);
-    pp_vec3_assign(point, &support_point);
 }
 
 bool pp_gjk_support(const PPBody* b1, const PPBody* b2, const PPVec3* direction, PPVec3* out) {
@@ -1601,14 +1599,23 @@ size_t pp_polytope_calc_face_normals(PPPolytope* polytope, size_t first_face) {
     float min_distance = FLT_MAX;
 
     for(size_t i = first_face; i < polytope->face_count; ++i) {
-        PPVec3* a = pp_simplex_at(polytope->simplex, polytope->faces[i].a);
-        PPVec3* b = pp_simplex_at(polytope->simplex, polytope->faces[i].b);
-        PPVec3* c = pp_simplex_at(polytope->simplex, polytope->faces[i].c);
+        assert(polytope->faces[i].a != polytope->faces[i].b);
+        assert(polytope->faces[i].a != polytope->faces[i].c);
+
+        const PPVec3 *a = &polytope->points[polytope->faces[i].a];
+        const PPVec3 *b = &polytope->points[polytope->faces[i].b];
+        const PPVec3 *c = &polytope->points[polytope->faces[i].c];
 
         pp_vec3_sub(b, a, &ab);
         pp_vec3_sub(c, a, &ac);
         pp_vec3_cross(&ab, &ac, &polytope->faces[i].n);
+
+#ifndef NDEBUG
+        bool ret = pp_vec3_normalize(&polytope->faces[i].n);
+        assert(ret); // This should always be a valid normal
+#else
         pp_vec3_normalize(&polytope->faces[i].n);
+#endif
 
         polytope->faces[i].d = pp_vec3_dot(&polytope->faces[i].n, a);
         if(polytope->faces[i].d < 0) {
@@ -1626,17 +1633,30 @@ size_t pp_polytope_calc_face_normals(PPPolytope* polytope, size_t first_face) {
 }
 
 void pp_polytope_erase_face(PPPolytope* polytope, size_t face_index) {
-    *(polytope->faces + face_index) = *(polytope->faces + (polytope->face_count - 1));
+    if(face_index != polytope->face_count - 1) {
+        memcpy(&polytope->faces[face_index], &polytope->faces[polytope->face_count - 1], sizeof(PPPolytopeFace));
+    }
+
     polytope->face_count--;
 }
 
 void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n, float* intersection) {
-    PPPolytope polytope = {
-        .simplex = simplex,
-        .faces = {{.abc={0, 1, 2}}, {.abc={0, 3, 1}}, {.abc={0, 2, 3}}, {.abc={1, 3, 2}}},
-        .face_count = 4,
-        .edge_count = 0
-    };
+    const PPVec3 *a = pp_simplex_at(simplex, 0);
+    const PPVec3 *b = pp_simplex_at(simplex, 1);
+    const PPVec3 *c = pp_simplex_at(simplex, 2);
+    const PPVec3 *d = pp_simplex_at(simplex, 3);
+
+    PPPolytope polytope = {.points = {{.xyz = {a->x, a->y, a->z}},
+                                      {.xyz = {b->x, b->y, b->z}},
+                                      {.xyz = {c->x, c->y, c->z}},
+                                      {.xyz = {d->x, d->y, d->z}}},
+                           .point_count = 4,
+                           .faces = {{.abc = {0, 1, 2}},
+                                     {.abc = {0, 3, 1}},
+                                     {.abc = {0, 2, 3}},
+                                     {.abc = {1, 3, 2}}},
+                           .face_count = 4,
+                           .edge_count = 0};
 
     size_t min_face = pp_polytope_calc_face_normals(&polytope, 0);
 
@@ -1647,9 +1667,8 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
         min_distance = polytope.faces[min_face].d;
 
         PPVec3 support;
-        float s_dist;
         pp_gjk_support(lhs, rhs, min_normal, &support);
-        s_dist = pp_vec3_dot(min_normal, &support);
+        float s_dist = pp_vec3_dot(min_normal, &support);
         if(fabs(s_dist - min_distance) > 0.001f) {
             min_distance = FLT_MAX;
 
@@ -1657,7 +1676,7 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
 
             for(size_t i = 0; i < polytope.face_count; ++i) {
                 PPVec3 dir;
-                pp_vec3_sub(&support, pp_simplex_at(polytope.simplex, polytope.faces[i].a), &dir);
+                pp_vec3_sub(&support, &polytope.points[polytope.faces[i].a], &dir);
 
                 if (pp_same_direction(&polytope.faces[i].n, &dir)) {
                     if(!pp_polytope_contains_edge(&polytope, polytope.faces[i].a, polytope.faces[i].b)) {
@@ -1680,10 +1699,13 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
             size_t new_face_index = polytope.face_count;
 
             for(size_t i = 0; i < polytope.edge_count; ++i) {
-                pp_polytope_push_face(&polytope, polytope.edges[i].a, polytope.edges[i].b, polytope.simplex->count);
+                pp_polytope_push_face(&polytope,
+                                      polytope.edges[i].a,
+                                      polytope.edges[i].b,
+                                      polytope.point_count);
             }
 
-            pp_simplex_push(polytope.simplex, &support);
+            pp_vec3_assign(&polytope.points[polytope.point_count++], &support);
             size_t new_min_face = pp_polytope_calc_face_normals(&polytope, new_face_index);
 
             float old_min_distance = FLT_MAX;
