@@ -579,7 +579,7 @@ bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPS
     const PPTriangle* closest_tri = NULL;
     const PPSphere* closest_sphere = NULL;
 
-    for(int i = 0; i < pp_physics_triangle_count(); ++i) {
+    for (int i = 0; i < (int) pp_physics_triangle_count(); ++i) {
         const PPTriangle* t = pp_physics_triangle_at(i);
 
         PPVec3 hit;
@@ -592,7 +592,7 @@ bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPS
         }
     }
 
-    for(int i = 0; i < pp_physics_body_total_count(); ++i) {
+    for (int i = 0; i < (int) pp_physics_body_total_count(); ++i) {
         const PPBody* body = pp_physics_body_at(i);
         const PPSphere* s = PP_SPHERE(body);
 
@@ -1625,10 +1625,11 @@ void pp_polytope_push_face(PPPolytope* polytope, uint8_t a, uint8_t b, uint8_t c
     polytope->face_count++;
 }
 
-size_t pp_polytope_calc_face_normals(PPPolytope* polytope, size_t first_face) {
+int pp_polytope_calc_face_normals(PPPolytope *polytope, size_t first_face)
+{
     PPVec3 ab, ac;
 
-    size_t min_triangle = 0;
+    size_t min_triangle = -1;
     float min_distance = FLT_MAX;
 
     for(size_t i = first_face; i < polytope->face_count; ++i) {
@@ -1662,7 +1663,7 @@ size_t pp_polytope_calc_face_normals(PPPolytope* polytope, size_t first_face) {
             polytope->faces[i].d *= -1.0f;
         }
 
-        if(polytope->faces[i].d < min_distance) {
+        if (polytope->faces[i].d < min_distance) {
             min_distance = polytope->faces[i].d;
             min_triangle = i;
         }
@@ -1704,7 +1705,8 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
                            .face_count = 4,
                            .edge_count = 0};
 
-    size_t min_face = pp_polytope_calc_face_normals(&polytope, 0);
+    int min_face = pp_polytope_calc_face_normals(&polytope, 0);
+    assert(min_face > -1);
 
     PPVec3* min_normal = NULL;
     float min_distance = FLT_MAX;
@@ -1757,18 +1759,21 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
             }
 
             pp_vec3_assign(&polytope.points[polytope.point_count++], &support);
-            size_t new_min_face = pp_polytope_calc_face_normals(&polytope, new_face_index);
-            assert(new_min_face < polytope.face_count);
+            int new_min_face = pp_polytope_calc_face_normals(&polytope, new_face_index);
+            assert(min_face > -1);
 
             float old_min_distance = FLT_MAX;
 
             for(size_t i = 0; i < new_face_index; ++i) {
-                if(polytope.faces[i].d < old_min_distance) {
+                assert(i < polytope.face_count);
+
+                if (polytope.faces[i].d < old_min_distance) {
                     old_min_distance = polytope.faces[i].d;
                     min_face = i;
                 }
             }
 
+            assert(new_min_face < (int) polytope.face_count);
             if(polytope.faces[new_min_face].d < old_min_distance) {
                 min_face = new_min_face;
             }
