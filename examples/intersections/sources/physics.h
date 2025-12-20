@@ -1586,14 +1586,15 @@ void pp_polytope_push_edge(PPPolytope* polytope, uint8_t a, uint8_t b) {
     assert(polytope->edge_count < MAX_POLYTOPE_EDGES);
 
     size_t i = 0;
+    bool found = false;
     for (; i < polytope->edge_count; ++i) {
-        if ((polytope->edges[i].a == a && polytope->edges[i].b == b)
-            || (polytope->edges[i].a == b && polytope->edges[i].b == a)) {
+        if (polytope->edges[i].a == b && polytope->edges[i].b == a) {
+            found = true;
             break;
         }
     }
 
-    if (i < polytope->edge_count) {
+    if (found) {
         // We need to erase i
         for (int j = i; j < int(polytope->edge_count) - 1; ++j) {
             polytope->edges[j].a = polytope->edges[j + 1].a;
@@ -1687,6 +1688,28 @@ void pp_polytope_erase_face(PPPolytope* polytope, size_t face_index) {
     polytope->face_count--;
 }
 
+void pp_polytope_write(const PPPolytope *polytope, const char *filename)
+{
+    FILE *out = fopen(filename, "wt");
+    for (int i = 0; i < polytope->point_count; ++i) {
+        fprintf(out,
+                "v %f %f %f\n",
+                polytope->points[i].x,
+                polytope->points[i].y,
+                polytope->points[i].z);
+    }
+
+    for (int i = 0; i < polytope->face_count; ++i) {
+        fprintf(out,
+                "f %d %d %d\n",
+                polytope->faces[i].a,
+                polytope->faces[i].b,
+                polytope->faces[i].c);
+    }
+
+    fclose(out);
+}
+
 void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n, float* intersection) {
     const PPVec3 *a = pp_simplex_at(simplex, 0);
     const PPVec3 *b = pp_simplex_at(simplex, 1);
@@ -1708,11 +1731,22 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
     int min_face = pp_polytope_calc_face_normals(&polytope, 0);
     assert(min_face > -1);
 
-    PPVec3* min_normal = NULL;
+    int iterations = 0;
+    const int MAX_ITERATIONS = 30;
+
+    PPVec3 *min_normal = NULL;
     float min_distance = FLT_MAX;
     while(min_distance == FLT_MAX) {
+        char filename[100];
+        sprintf(filename, "%d.obj", iterations);
+        pp_polytope_write(&polytope, filename);
+
         min_normal = &polytope.faces[min_face].n;
         min_distance = polytope.faces[min_face].d;
+
+        if (iterations++ > MAX_ITERATIONS) {
+            break;
+        }
 
         PPVec3 support;
         bool ok = pp_gjk_support(lhs, rhs, min_normal, &support);
@@ -1722,6 +1756,16 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
         }
 
         float s_dist = pp_vec3_dot(min_normal, &support);
+
+        fprintf(stderr, "%f %f %f\n", support.x, support.y, support.z);
+        fprintf(stderr,
+                "%f vs %f -> %f %f %f\n",
+                s_dist,
+                min_distance,
+                min_normal->x,
+                min_normal->y,
+                min_normal->z);
+
         if (fabs(s_dist - min_distance) > 0.001f) {
             min_distance = FLT_MAX;
 
