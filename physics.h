@@ -216,7 +216,7 @@ void pp_physics_step(float t);
 bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance);
 void pp_physics_clear();
 void pp_physics_set_gravity(const PPVec3* v);
-bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, bool (*callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c));
+bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, void* user_data, bool (*callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c, const void*));
 
 PPTriangle* pp_physics_create_triangle(const PPVec3* v1, const PPVec3* v2, const PPVec3* v3, BodyKind kind);
 size_t pp_physics_triangle_count();
@@ -1596,7 +1596,7 @@ void pp_polytope_push_edge(PPPolytope* polytope, uint8_t a, uint8_t b) {
 
     if (found) {
         // We need to erase i
-        for (int j = i; j < int(polytope->edge_count) - 1; ++j) {
+        for (int j = i; j < ((int) polytope->edge_count) - 1; ++j) {
             polytope->edges[j].a = polytope->edges[j + 1].a;
             polytope->edges[j].b = polytope->edges[j + 1].b;
         }
@@ -1623,6 +1623,7 @@ void pp_polytope_push_face(PPPolytope* polytope, uint8_t a, uint8_t b, uint8_t c
     polytope->faces[polytope->face_count].a = a;
     polytope->faces[polytope->face_count].b = b;
     polytope->faces[polytope->face_count].c = c;
+
     polytope->face_count++;
 }
 
@@ -1648,17 +1649,18 @@ int pp_polytope_calc_face_normals(PPPolytope *polytope, size_t first_face)
         pp_vec3_sub(c, a, &ac);
         pp_vec3_cross(&ab, &ac, &polytope->faces[i].n);
 
-#ifndef NDEBUG
         bool ret = pp_vec3_normalize(&polytope->faces[i].n);
-        assert(ret); // This should always be a valid normal
-#else
-        pp_vec3_normalize(&polytope->faces[i].n);
-#endif
+        // assert(ret); // This should always be a valid normal
 
-        PPVec3 average;
-        pp_vec3_average(a, b, c, &average);
+        if (!ret) {
+            return -1;
+        }
 
-        polytope->faces[i].d = pp_vec3_length(&average);
+        // PPVec3 average;
+        // pp_vec3_average(a, b, c, &average);
+        // polytope->faces[i].d = pp_vec3_length(&average);
+        polytope->faces[i].d = pp_vec3_dot(&polytope->faces[i].n, a);
+
         if(polytope->faces[i].d < 0) {
             pp_vec3_neg(&polytope->faces[i].n, &polytope->faces[i].n);
             polytope->faces[i].d *= -1.0f;
@@ -1702,15 +1704,44 @@ void pp_polytope_write(const PPPolytope *polytope, const char *filename)
     for (int i = 0; i < polytope->face_count; ++i) {
         fprintf(out,
                 "f %d %d %d\n",
-                polytope->faces[i].a,
-                polytope->faces[i].b,
-                polytope->faces[i].c);
+                polytope->faces[i].a + 1,
+                polytope->faces[i].b + 1,
+                polytope->faces[i].c + 1);
     }
 
     fclose(out);
 }
 
-void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n, float* intersection) {
+void pp_triangle_get_barycentric(const PPTriangle *tri, const PPVec3 *p, PPVec3 *coords)
+{
+    const PPVec3 *a = &tri->v[0];
+    const PPVec3 *b = &tri->v[1];
+    const PPVec3 *c = &tri->v[2];
+
+    PPVec3 ab, ac, ap;
+    pp_vec3_sub(b, a, &ab);
+    pp_vec3_sub(c, a, &ac);
+    pp_vec3_sub(p, a, &ap);
+
+    float daa = pp_vec3_dot(a, a);
+    float dab = pp_vec3_dot(a, b);
+    float dbb = pp_vec3_dot(b, b);
+    float dca = pp_vec3_dot(c, a);
+    float dcb = pp_vec3_dot(c, b);
+
+    float denom = daa * dbb - dab * dab;
+    coords->x = (dbb * dca - dab * dcb) / denom;
+    coords->y = (daa * dcb - dab * dca) / denom;
+    coords->z = 1.0f - coords->x - coords->y;
+}
+
+bool pp_epa(PPSimplex *simplex,
+            const PPBody *lhs,
+            const PPBody *rhs,
+            PPVec3 *n,
+            float *intersection,
+            PPVec3 *contact)
+{
     const PPVec3 *a = pp_simplex_at(simplex, 0);
     const PPVec3 *b = pp_simplex_at(simplex, 1);
     const PPVec3 *c = pp_simplex_at(simplex, 2);
@@ -1730,6 +1761,10 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
 
     int min_face = pp_polytope_calc_face_normals(&polytope, 0);
     assert(min_face > -1);
+    if (min_face < 0) {
+        // Degenerate face
+        return false;
+    }
 
     int iterations = 0;
     const int MAX_ITERATIONS = 30;
@@ -1755,24 +1790,28 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
             continue;
         }
 
-        float s_dist = pp_vec3_dot(min_normal, &support);
+        float s_dist = fabs(pp_vec3_dot(&support, min_normal));
 
-        fprintf(stderr, "%f %f %f\n", support.x, support.y, support.z);
-        fprintf(stderr,
-                "%f vs %f -> %f %f %f\n",
-                s_dist,
-                min_distance,
-                min_normal->x,
-                min_normal->y,
-                min_normal->z);
+        // fprintf(stderr, "%f %f %f\n", support.x, support.y, support.z);
+        // fprintf(stderr,
+        //         "%f vs %f -> %f %f %f\n",
+        //         s_dist,
+        //         min_distance,
+        //         min_normal->x,
+        //         min_normal->y,
+        //         min_normal->z);
 
-        if (fabs(s_dist - min_distance) > 0.001f) {
+        bool close_enough = s_dist <= (min_distance + 0.001f);
+        if (close_enough) {
             min_distance = FLT_MAX;
 
             pp_polytope_clear_edges(&polytope);
 
-            for(size_t i = 0; i < polytope.face_count; ++i) {
-                if (pp_same_direction(&polytope.faces[i].n, &support)) {
+            for (size_t i = 0; i < polytope.face_count; ++i) {
+                PPVec3 test;
+                pp_vec3_sub(&support, &polytope.points[polytope.faces[i].a], &test);
+
+                if (pp_same_direction(&polytope.faces[i].n, &test)) {
                     assert(polytope.faces[i].a != polytope.faces[i].b);
                     assert(polytope.faces[i].a != polytope.faces[i].c);
 
@@ -1804,7 +1843,10 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
 
             pp_vec3_assign(&polytope.points[polytope.point_count++], &support);
             int new_min_face = pp_polytope_calc_face_normals(&polytope, new_face_index);
-            assert(min_face > -1);
+            if (new_min_face < 0) {
+                // We've somehow got a degenerate face
+                break;
+            }
 
             float old_min_distance = FLT_MAX;
 
@@ -1824,8 +1866,26 @@ void pp_epa(PPSimplex* simplex, const PPBody* lhs, const PPBody* rhs, PPVec3* n,
         }
     }
 
+    if (min_distance == FLT_MAX) {
+        return false;
+    }
+
     pp_vec3_assign(n, min_normal);
     *intersection = min_distance + 0.001f;
+
+    PPTriangle tri;
+    const PPPolytopeFace *f = &polytope.faces[min_face];
+    pp_vec3_assign(&tri.v[0], &polytope.points[f->a]);
+    pp_vec3_assign(&tri.v[1], &polytope.points[f->b]);
+    pp_vec3_assign(&tri.v[2], &polytope.points[f->c]);
+
+    PPVec3 barycentric, point;
+    pp_vec3_scale(&f->n, *intersection, &point);
+    pp_triangle_get_barycentric(&tri, &point, &barycentric);
+
+    // contact->x = barycentric.x *
+
+    return true;
 }
 
 static inline bool flt_close(const float a, const float b) {
@@ -1835,7 +1895,7 @@ static inline bool flt_close(const float a, const float b) {
 bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* contact_point, PPVec3* n, float* intersection) {
     PPSimplex simplex;
     if(pp_gjk_collide(PP_BODY(lhs), PP_BODY(rhs), pp_simplex_init(&simplex))) {
-        pp_epa(&simplex, PP_BODY(lhs), PP_BODY(rhs), n, intersection);
+        pp_epa(&simplex, PP_BODY(lhs), PP_BODY(rhs), n, intersection, contact_point);
         return true;
     }
 
