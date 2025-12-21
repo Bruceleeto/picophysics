@@ -1252,8 +1252,14 @@ static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPColl
     }
 }
 
+typedef struct _PPSupportPoint {
+    PPVec3 point;
+    PPVec3 a;
+    PPVec3 b;
+} PPSupportPoint;
+
 typedef struct _PPSimplex {
-    PPVec3 points[4];
+    PPSupportPoint points[4];
     size_t count;
 } PPSimplex;
 
@@ -1280,7 +1286,7 @@ typedef struct _PPPolytopeEdge {
 #define MAX_POLYTOPE_EDGES 512
 
 typedef struct _PPPolytope {
-    PPVec3 points[MAX_POLYTOPE_POINTS];
+    PPSupportPoint points[MAX_POLYTOPE_POINTS];
     size_t point_count;
 
     PPPolytopeFace faces[MAX_POLYTOPE_FACES];
@@ -1299,66 +1305,66 @@ PPSimplex* pp_simplex_init(PPSimplex* s) {
     return s;
 }
 
-bool pp_simplex_push(PPSimplex* simplex, const PPVec3* point) {
+bool pp_simplex_push(PPSimplex* simplex, const PPSupportPoint* point) {
     assert(simplex->count < 4);
 
-    pp_vec3_assign(&simplex->points[3], &simplex->points[2]);
-    pp_vec3_assign(&simplex->points[2], &simplex->points[1]);
-    pp_vec3_assign(&simplex->points[1], &simplex->points[0]);
-    pp_vec3_assign(&simplex->points[0], point);
+    memcpy(&simplex->points[3], &simplex->points[2], sizeof(PPSupportPoint));
+    memcpy(&simplex->points[2], &simplex->points[1], sizeof(PPSupportPoint));
+    memcpy(&simplex->points[1], &simplex->points[0], sizeof(PPSupportPoint));
+    memcpy(&simplex->points[0], point, sizeof(PPSupportPoint));
     simplex->count++;
 
     return true;
 }
 
-PPVec3* pp_simplex_at(PPSimplex* simplex, size_t i) {
+PPSupportPoint* pp_simplex_at(PPSimplex* simplex, size_t i) {
     assert(i < simplex->count);
     return &simplex->points[i];
 }
 
-void pp_simplex_replace1(PPSimplex* simplex, const PPVec3* point) {
+void pp_simplex_replace1(PPSimplex* simplex, const PPSupportPoint* point) {
     simplex->count = 1;
-    pp_vec3_assign(&simplex->points[0], point);
+    memcpy(&simplex->points[0], point, sizeof(PPSupportPoint));
 }
 
-void pp_simplex_replace2(PPSimplex* simplex, const PPVec3* p0, const PPVec3* p1) {
+void pp_simplex_replace2(PPSimplex* simplex, const PPSupportPoint* p0, const PPSupportPoint* p1) {
     simplex->count = 2;
 
     // Temp variables are necessary as p0 or p1 may be
     // the points we're replacing
-    PPVec3 t0, t1;
-    pp_vec3_assign(&t0, p0);
-    pp_vec3_assign(&t1, p1);
+    PPSupportPoint t0, t1;
+    memcpy(&t0, p0, sizeof(PPSupportPoint));
+    memcpy(&t1, p1, sizeof(PPSupportPoint));
 
-    pp_vec3_assign(&simplex->points[0], &t0);
-    pp_vec3_assign(&simplex->points[1], &t1);
+    memcpy(&simplex->points[0], &t0, sizeof(PPSupportPoint));
+    memcpy(&simplex->points[1], &t1, sizeof(PPSupportPoint));
 }
 
-void pp_simplex_replace3(PPSimplex* simplex, const PPVec3* p0, const PPVec3* p1, const PPVec3* p2) {
+void pp_simplex_replace3(PPSimplex* simplex, const PPSupportPoint* p0, const PPSupportPoint* p1, const PPSupportPoint* p2) {
     // FIXME: This needs performance testing. There are probably faster ways than just creating
     // 3 temporary variables
     simplex->count = 3;
 
     // Temp variables are necessary as p0 or p1 may be
     // the points we're replacing
-    PPVec3 t0, t1, t2;
-    pp_vec3_assign(&t0, p0);
-    pp_vec3_assign(&t1, p1);
-    pp_vec3_assign(&t2, p2);
+    PPSupportPoint t0, t1, t2;
+    memcpy(&t0, p0, sizeof(PPSupportPoint));
+    memcpy(&t1, p1, sizeof(PPSupportPoint));
+    memcpy(&t2, p2, sizeof(PPSupportPoint));
 
-    pp_vec3_assign(&simplex->points[0], &t0);
-    pp_vec3_assign(&simplex->points[1], &t1);
-    pp_vec3_assign(&simplex->points[2], &t2);
+    memcpy(&simplex->points[0], &t0, sizeof(PPSupportPoint));
+    memcpy(&simplex->points[1], &t1, sizeof(PPSupportPoint));
+    memcpy(&simplex->points[2], &t2, sizeof(PPSupportPoint));
 }
 
 bool pp_simplex_next_line(PPSimplex* simplex, PPVec3* direction) {
     PPVec3 ab, ao;
 
-    PPVec3* a = pp_simplex_at(simplex, 0);
-    PPVec3* b = pp_simplex_at(simplex, 1);
+    PPSupportPoint* a = pp_simplex_at(simplex, 0);
+    PPSupportPoint* b = pp_simplex_at(simplex, 1);
 
-    pp_vec3_sub(b, a, &ab);
-    pp_vec3_neg(a, &ao);
+    pp_vec3_sub(&b->point, &a->point, &ab);
+    pp_vec3_neg(&a->point, &ao);
 
     if(pp_same_direction(&ab, &ao)) {
         PPVec3 t;
@@ -1375,13 +1381,13 @@ bool pp_simplex_next_line(PPSimplex* simplex, PPVec3* direction) {
 bool pp_simplex_next_triangle(PPSimplex* simplex, PPVec3* direction) {
     PPVec3 ab, ac, ao, abc;
 
-    PPVec3* a = pp_simplex_at(simplex, 0);
-    PPVec3* b = pp_simplex_at(simplex, 1);
-    PPVec3* c = pp_simplex_at(simplex, 2);
+    PPSupportPoint* a = pp_simplex_at(simplex, 0);
+    PPSupportPoint* b = pp_simplex_at(simplex, 1);
+    PPSupportPoint* c = pp_simplex_at(simplex, 2);
 
-    pp_vec3_sub(b, a, &ab);
-    pp_vec3_sub(c, a, &ac);
-    pp_vec3_neg(a, &ao);
+    pp_vec3_sub(&b->point, &a->point, &ab);
+    pp_vec3_sub(&c->point, &a->point, &ac);
+    pp_vec3_neg(&a->point, &ao);
     pp_vec3_cross(&ab, &ac, &abc);
 
     PPVec3 n;
@@ -1421,15 +1427,15 @@ bool pp_simplex_next_tetrahedron(PPSimplex* simplex, PPVec3* direction) {
     PPVec3 ab, ac, ad, ao;
     PPVec3 abc, acd, adb;
 
-    PPVec3* a = pp_simplex_at(simplex, 0);
-    PPVec3* b = pp_simplex_at(simplex, 1);
-    PPVec3* c = pp_simplex_at(simplex, 2);
-    PPVec3* d = pp_simplex_at(simplex, 3);
+    PPSupportPoint* a = pp_simplex_at(simplex, 0);
+    PPSupportPoint* b = pp_simplex_at(simplex, 1);
+    PPSupportPoint* c = pp_simplex_at(simplex, 2);
+    PPSupportPoint* d = pp_simplex_at(simplex, 3);
 
-    pp_vec3_sub(b, a, &ab);
-    pp_vec3_sub(c, a, &ac);
-    pp_vec3_sub(d, a, &ad);
-    pp_vec3_neg(a, &ao);
+    pp_vec3_sub(&b->point, &a->point, &ab);
+    pp_vec3_sub(&c->point, &a->point, &ac);
+    pp_vec3_sub(&d->point, &a->point, &ad);
+    pp_vec3_neg(&a->point, &ao);
 
     pp_vec3_cross(&ab, &ac, &abc);
     if(pp_same_direction(&abc, &ao)) {
@@ -1497,27 +1503,27 @@ void pp_find_furthest_point_box(const PPBox* box, const PPVec3* direction, PPVec
     pp_vec3_add(&box->body.pos, &support_point, point);
 }
 
-bool pp_gjk_support(const PPBody* b1, const PPBody* b2, const PPVec3* direction, PPVec3* out) {
+bool pp_gjk_support(const PPBody* b1, const PPBody* b2, const PPVec3* direction, PPSupportPoint* out) {
     if(b1->type == PP_OBJECT_TYPE_BOX && b2->type == PP_OBJECT_TYPE_BOX) {
-        PPVec3 reverse, first, second;
+        PPVec3 reverse;
         pp_vec3_neg(direction, &reverse);
-        pp_find_furthest_point_box(PP_BOX(b1), direction, &first);
-        pp_find_furthest_point_box(PP_BOX(b2), &reverse, &second);
-        pp_vec3_sub(&first, &second, out);
+        pp_find_furthest_point_box(PP_BOX(b1), direction, &out->a);
+        pp_find_furthest_point_box(PP_BOX(b2), &reverse, &out->b);
+        pp_vec3_sub(&out->a, &out->b, &out->point);
         return true;
     } else if(b1->type == PP_OBJECT_TYPE_BOX && b2->type == PP_OBJECT_TYPE_SPHERE) {
         PPVec3 reverse, first, second;
         pp_vec3_neg(direction, &reverse);
-        pp_find_furthest_point_box(PP_BOX(b1), direction, &first);
-        pp_find_furthest_point_sphere(PP_SPHERE(b2), &reverse, &second);
-        pp_vec3_sub(&first, &second, out);
+        pp_find_furthest_point_box(PP_BOX(b1), direction, &out->a);
+        pp_find_furthest_point_sphere(PP_SPHERE(b2), &reverse, &out->b);
+        pp_vec3_sub(&out->a, &out->b, &out->point);
         return true;
     } else if(b1->type == PP_OBJECT_TYPE_SPHERE && b2->type == PP_OBJECT_TYPE_BOX) {
         PPVec3 reverse, first, second;
         pp_vec3_neg(direction, &reverse);
-        pp_find_furthest_point_sphere(PP_SPHERE(b1), direction, &first);
-        pp_find_furthest_point_box(PP_BOX(b2), &reverse, &second);
-        pp_vec3_sub(&first, &second, out);
+        pp_find_furthest_point_sphere(PP_SPHERE(b1), direction, &out->a);
+        pp_find_furthest_point_box(PP_BOX(b2), &reverse, &out->b);
+        pp_vec3_sub(&out->a, &out->b, &out->point);
         return true;
     }
 
@@ -1540,7 +1546,7 @@ bool pp_gjk_collide(const PPBody* b1, const PPBody* b2, PPSimplex* simplex) {
 
     pp_vec3_cross(&ab, &c, &abc);
 
-    PPVec3 support;
+    PPSupportPoint support;
     if (!pp_gjk_support(b1, b2, &abc, &support)) {
 #ifndef NDEBUG
         fprintf(stderr, "Invalid body types\n");
@@ -1550,7 +1556,7 @@ bool pp_gjk_collide(const PPBody* b1, const PPBody* b2, PPSimplex* simplex) {
     pp_simplex_push(simplex, &support);
 
     PPVec3 direction;
-    pp_vec3_neg(&support, &direction);
+    pp_vec3_neg(&support.point, &direction);
 
     int i = 0;
     for(i = 0; i < 50; ++i) {
@@ -1558,7 +1564,7 @@ bool pp_gjk_collide(const PPBody* b1, const PPBody* b2, PPSimplex* simplex) {
             return false;
         }
 
-        if (pp_vec3_dot(&support, &direction) <= 0) {
+        if (pp_vec3_dot(&support.point, &direction) <= 0) {
             return false;
         }
 
@@ -1641,9 +1647,9 @@ int pp_polytope_calc_face_normals(PPPolytope *polytope, size_t first_face)
         assert(polytope->faces[i].b < polytope->point_count);
         assert(polytope->faces[i].c < polytope->point_count);
 
-        const PPVec3 *a = &polytope->points[polytope->faces[i].a];
-        const PPVec3 *b = &polytope->points[polytope->faces[i].b];
-        const PPVec3 *c = &polytope->points[polytope->faces[i].c];
+        const PPVec3 *a = &polytope->points[polytope->faces[i].a].point;
+        const PPVec3 *b = &polytope->points[polytope->faces[i].b].point;
+        const PPVec3 *c = &polytope->points[polytope->faces[i].c].point;
 
         pp_vec3_sub(b, a, &ab);
         pp_vec3_sub(c, a, &ac);
@@ -1696,9 +1702,9 @@ void pp_polytope_write(const PPPolytope *polytope, const char *filename)
     for (int i = 0; i < polytope->point_count; ++i) {
         fprintf(out,
                 "v %f %f %f\n",
-                polytope->points[i].x,
-                polytope->points[i].y,
-                polytope->points[i].z);
+                polytope->points[i].point.x,
+                polytope->points[i].point.y,
+                polytope->points[i].point.z);
     }
 
     for (int i = 0; i < polytope->face_count; ++i) {
@@ -1742,22 +1748,23 @@ bool pp_epa(PPSimplex *simplex,
             float *intersection,
             PPVec3 *contact)
 {
-    const PPVec3 *a = pp_simplex_at(simplex, 0);
-    const PPVec3 *b = pp_simplex_at(simplex, 1);
-    const PPVec3 *c = pp_simplex_at(simplex, 2);
-    const PPVec3 *d = pp_simplex_at(simplex, 3);
+    const PPSupportPoint *a = pp_simplex_at(simplex, 0);
+    const PPSupportPoint *b = pp_simplex_at(simplex, 1);
+    const PPSupportPoint *c = pp_simplex_at(simplex, 2);
+    const PPSupportPoint *d = pp_simplex_at(simplex, 3);
 
-    PPPolytope polytope = {.points = {{.xyz = {a->x, a->y, a->z}},
-                                      {.xyz = {b->x, b->y, b->z}},
-                                      {.xyz = {c->x, c->y, c->z}},
-                                      {.xyz = {d->x, d->y, d->z}}},
-                           .point_count = 4,
-                           .faces = {{.abc = {0, 1, 2}},
+    PPPolytope polytope = {.faces = {{.abc = {0, 1, 2}},
                                      {.abc = {0, 3, 1}},
                                      {.abc = {0, 2, 3}},
                                      {.abc = {1, 3, 2}}},
+                            .point_count = 0,
                            .face_count = 4,
                            .edge_count = 0};
+
+    memcpy(&polytope.points[0], a, sizeof(PPSupportPoint));
+    memcpy(&polytope.points[1], b, sizeof(PPSupportPoint));
+    memcpy(&polytope.points[2], c, sizeof(PPSupportPoint));
+    memcpy(&polytope.points[3], d, sizeof(PPSupportPoint));
 
     int min_face = pp_polytope_calc_face_normals(&polytope, 0);
     assert(min_face > -1);
@@ -1783,14 +1790,14 @@ bool pp_epa(PPSimplex *simplex,
             break;
         }
 
-        PPVec3 support;
+        PPSupportPoint support;
         bool ok = pp_gjk_support(lhs, rhs, min_normal, &support);
         assert(ok);
         if (!ok) {
             continue;
         }
 
-        float s_dist = fabs(pp_vec3_dot(&support, min_normal));
+        float s_dist = fabs(pp_vec3_dot(&support.point, min_normal));
 
         // fprintf(stderr, "%f %f %f\n", support.x, support.y, support.z);
         // fprintf(stderr,
@@ -1809,7 +1816,7 @@ bool pp_epa(PPSimplex *simplex,
 
             for (size_t i = 0; i < polytope.face_count; ++i) {
                 PPVec3 test;
-                pp_vec3_sub(&support, &polytope.points[polytope.faces[i].a], &test);
+                pp_vec3_sub(&support.point, &polytope.points[polytope.faces[i].a].point, &test);
 
                 if (pp_same_direction(&polytope.faces[i].n, &test)) {
                     assert(polytope.faces[i].a != polytope.faces[i].b);
@@ -1841,7 +1848,7 @@ bool pp_epa(PPSimplex *simplex,
                                       polytope.point_count);
             }
 
-            pp_vec3_assign(&polytope.points[polytope.point_count++], &support);
+            memcpy(&polytope.points[polytope.point_count++], &support, sizeof(PPSupportPoint));
             int new_min_face = pp_polytope_calc_face_normals(&polytope, new_face_index);
             if (new_min_face < 0) {
                 // We've somehow got a degenerate face
@@ -1875,9 +1882,9 @@ bool pp_epa(PPSimplex *simplex,
 
     PPTriangle tri;
     const PPPolytopeFace *f = &polytope.faces[min_face];
-    pp_vec3_assign(&tri.v[0], &polytope.points[f->a]);
-    pp_vec3_assign(&tri.v[1], &polytope.points[f->b]);
-    pp_vec3_assign(&tri.v[2], &polytope.points[f->c]);
+    pp_vec3_assign(&tri.v[0], &polytope.points[f->a].point);
+    pp_vec3_assign(&tri.v[1], &polytope.points[f->b].point);
+    pp_vec3_assign(&tri.v[2], &polytope.points[f->c].point);
 
     PPVec3 barycentric, point;
     pp_vec3_scale(&f->n, *intersection, &point);
