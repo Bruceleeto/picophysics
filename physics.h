@@ -1724,21 +1724,21 @@ void pp_triangle_get_barycentric(const PPTriangle *tri, const PPVec3 *p, PPVec3 
     const PPVec3 *b = &tri->v[1];
     const PPVec3 *c = &tri->v[2];
 
-    PPVec3 ab, ac, ap;
-    pp_vec3_sub(b, a, &ab);
-    pp_vec3_sub(c, a, &ac);
-    pp_vec3_sub(p, a, &ap);
+    PPVec3 v0, v1, v2;
+    pp_vec3_sub(b, a, &v0);
+    pp_vec3_sub(c, a, &v1);
+    pp_vec3_sub(p, a, &v2);
 
-    float daa = pp_vec3_dot(a, a);
-    float dab = pp_vec3_dot(a, b);
-    float dbb = pp_vec3_dot(b, b);
-    float dca = pp_vec3_dot(c, a);
-    float dcb = pp_vec3_dot(c, b);
+    float d00 = pp_vec3_dot(&v0, &v0);
+    float d01 = pp_vec3_dot(&v0, &v1);
+    float d11 = pp_vec3_dot(&v1, &v1);
+    float d20 = pp_vec3_dot(&v2, &v0);
+    float d21 = pp_vec3_dot(&v2, &v1);
 
-    float denom = daa * dbb - dab * dab;
-    coords->x = (dbb * dca - dab * dcb) / denom;
-    coords->y = (daa * dcb - dab * dca) / denom;
-    coords->z = 1.0f - coords->x - coords->y;
+    float denom = d00 * d11 - d01 * d01;
+    coords->y = (d11 * d20 - d01 * d21) / denom;
+    coords->z = (d00 * d21 - d01 * d20) / denom;
+    coords->x = 1.0f - coords->y - coords->z;
 }
 
 bool pp_epa(PPSimplex *simplex,
@@ -1757,10 +1757,10 @@ bool pp_epa(PPSimplex *simplex,
                                      {.abc = {0, 3, 1}},
                                      {.abc = {0, 2, 3}},
                                      {.abc = {1, 3, 2}}},
-                            .point_count = 0,
                            .face_count = 4,
                            .edge_count = 0};
 
+    polytope.point_count = 4;
     memcpy(&polytope.points[0], a, sizeof(PPSupportPoint));
     memcpy(&polytope.points[1], b, sizeof(PPSupportPoint));
     memcpy(&polytope.points[2], c, sizeof(PPSupportPoint));
@@ -1877,7 +1877,6 @@ bool pp_epa(PPSimplex *simplex,
         return false;
     }
 
-    pp_vec3_assign(n, min_normal);
     *intersection = min_distance + 0.001f;
 
     PPTriangle tri;
@@ -1890,7 +1889,13 @@ bool pp_epa(PPSimplex *simplex,
     pp_vec3_scale(&f->n, *intersection, &point);
     pp_triangle_get_barycentric(&tri, &point, &barycentric);
 
-    // contact->x = barycentric.x *
+    PPVec3 p0, p1, p2;
+    pp_vec3_scale(&polytope.points[f->a].a, barycentric.x, &p0);
+    pp_vec3_scale(&polytope.points[f->b].a, barycentric.y, &p1);
+    pp_vec3_scale(&polytope.points[f->c].a, barycentric.z, &p2);
+    pp_vec3_add(&p0, &p1, contact);
+    pp_vec3_add(contact, &p2, contact);
+    pp_vec3_neg(min_normal, n);
 
     return true;
 }

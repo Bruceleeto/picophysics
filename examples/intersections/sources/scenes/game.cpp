@@ -128,8 +128,8 @@ bool dont_collide(
 
     smlt::Vec3 point(c->p.x, c->p.y, c->p.z);
     smlt::Vec3 normal(c->n.x, c->n.y, c->n.z);
-    scene->debug_->draw_point(point);
-    scene->debug_->draw_line(point, point + normal);
+    scene->debug_->draw_point(point, smlt::Color::red());
+    scene->debug_->draw_line(point, point + normal, smlt::Color::green());
     return false;
 }
 
@@ -201,6 +201,8 @@ void GameScene::on_load() {
     layer->set_clear_flags(smlt::BUFFER_CLEAR_ALL);
 
     debug_ = create_child<smlt::Debug>();
+    debug_->set_line_width(0.05f);
+    debug_->set_point_size(0.25f);
 }
 
 void GameScene::on_fixed_update(float step)
