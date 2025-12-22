@@ -118,11 +118,22 @@ struct _PPSphere;
 
 typedef uint8_t BodyKind;
 
+typedef enum _PPObjectType {
+    PP_OBJECT_TYPE_SPHERE,
+    PP_OBJECT_TYPE_BOX,
+    PP_OBJECT_TYPE_TRIANGLE,
+} PPObjectType;
+
+typedef struct _PPBody PPBody;
+
 typedef struct _PPCollision {
     PPVec3 p;
     PPVec3 n;
-    void* obj1;
-    void* obj2;
+    PPBody* obj1;
+    PPBody* obj2;
+
+    PPObjectType type1;
+    PPObjectType type2;
 
     BodyKind kind1;
     BodyKind kind2;
@@ -140,11 +151,6 @@ typedef enum _PPAxisLock {
     PP_AXIS_LOCK_YAW_AND_ROLL = PP_AXIS_LOCK_YAW | PP_AXIS_LOCK_ROLL,
     PP_AXIS_LOCK_ALL = PP_AXIS_LOCK_PITCH | PP_AXIS_LOCK_YAW | PP_AXIS_LOCK_ROLL
 } PPAxisLock;
-
-typedef enum _PPObjectType {
-    PP_OBJECT_TYPE_SPHERE,
-    PP_OBJECT_TYPE_BOX,
-} PPObjectType;
 
 typedef struct _PPBody {
     PPObjectType type;
@@ -974,6 +980,12 @@ void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, co
     c->dist = d;
     pp_vec3_assign(&c->p, contact_point);
     pp_vec3_assign(&c->n, n);
+    c->obj1 = PP_BODY(lhs);
+    c->obj2 = PP_BODY(rhs);
+    c->type1 = PP_OBJECT_TYPE_SPHERE;
+    c->type2 = PP_OBJECT_TYPE_BOX;
+    c->kind1 = lhs->body.kind;
+    c->kind2 = rhs->body.kind;
 }
 
 void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* rhs, float dist, PPCollision* c) {
@@ -992,12 +1004,25 @@ void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* r
     for(int i = 0; i < 3; ++i) {
         c->p.xyz[i] = lhs->body.pos.xyz[i] * wr1 + rhs->body.pos.xyz[i] * wr2;
     }
+
+    c->obj1 = PP_BODY(lhs);
+    c->obj2 = PP_BODY(rhs);
+    c->type1 = PP_OBJECT_TYPE_SPHERE;
+    c->type2 = PP_OBJECT_TYPE_SPHERE;
+    c->kind1 = lhs->body.kind;
+    c->kind2 = rhs->body.kind;
 }
 
 void pp_fill_collision_info_sphere_triangle(const PPSphere* lhs, const PPTriangle* tri, const PPVec3* p, float dist, PPCollision* c) {
     pp_vec3_scale(&tri->n, 1.0f, &c->n); // Copy
     pp_vec3_scale(p, 1.0f, &c->p); // Copy
     c->dist = dist;
+    c->obj1 = PP_BODY(lhs);
+    c->obj2 = NULL;
+    c->type1 = PP_OBJECT_TYPE_SPHERE;
+    c->type2 = PP_OBJECT_TYPE_TRIANGLE;
+    c->kind1 = lhs->body.kind;
+    c->kind2 = tri->kind;
 }
 
 PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, BodyKind kind) {
@@ -1104,6 +1129,54 @@ void pp_physics_destroy_sphere(PPSphere* s) {
 void pp_physics_set_gravity(const PPVec3* v) {
     pp_vec3_assign(&gravity, v);
     gravity_magnitude = pp_vec3_length(&gravity);
+}
+
+
+static void pp_solve(const PPCollision* manifold) {
+    PPBody* lhs = PP_BODY(manifold->obj1);
+    PPBody* rhs = PP_BODY(manifold->obj2);
+
+    float overlap = manifold->dist;
+
+    PPVec3 adjustment_lhs, adjustment_rhs;
+    pp_vec3_scale(&manifold->n, overlap * 0.5f, &adjustment_lhs);
+    pp_vec3_scale(&manifold->n, overlap * 0.5f, &adjustment_rhs);
+    pp_vec3_add(&lhs->pos, &adjustment_lhs, &lhs->pos);
+    pp_vec3_sub(&rhs->pos, &adjustment_rhs, &rhs->pos);
+
+    PPVec3 rel_vel;
+    pp_vec3_sub(&rhs->vel, &lhs->vel, &rel_vel);   // v_rhs – v_lhs
+    float vel_along_normal = pp_vec3_dot(&rel_vel, &manifold->n);
+    if (vel_along_normal < 0) {
+        PPVec3 penetration, tangent;
+        pp_vec3_scale(&manifold->n, vel_along_normal, &penetration);
+        pp_vec3_sub(&rel_vel, &penetration, &tangent);
+
+        // Moving towards each other
+        float r = fmax(lhs->bounce, rhs->bounce);
+        float f = fmin(lhs->friction, rhs->friction);
+
+        float inv_mass_sum = lhs->inv_mass + rhs->inv_mass;
+        float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
+        PPVec3 impulse_n;
+        pp_vec3_scale(&manifold->n, j_n, &impulse_n);
+
+        float jt = -pp_vec3_dot(&rel_vel, &tangent) / inv_mass_sum;
+        jt = fmax(-j_n * f, fmin(jt, j_n * f));   // clamp to μ·|j_n|
+        PPVec3 impulse_t;
+        pp_vec3_normalize(&tangent);      // ensure unit tangent
+        pp_vec3_scale(&tangent, jt, &impulse_t);
+
+        PPVec3 impulse;
+        pp_vec3_add(&impulse_n, &impulse_t, &impulse);
+
+        PPVec3 dv_lhs, dv_rhs;
+        pp_vec3_scale(&impulse, lhs->inv_mass, &dv_lhs);
+        pp_vec3_scale(&impulse, rhs->inv_mass, &dv_rhs);
+
+        pp_vec3_add(&lhs->vel, &dv_lhs, &lhs->vel);   // v_lhs ← v_lhs + Δv
+        pp_vec3_sub(&rhs->vel, &dv_rhs, &rhs->vel);   // v_rhs ← v_rhs + Δv
+    }
 }
 
 static void pp_sphere_box_response(PPSphere* sphere, PPBox* box, const PPCollision* c, float t) {
@@ -1281,9 +1354,9 @@ typedef struct _PPPolytopeEdge {
     uint8_t b;
 } PPPolytopeEdge;
 
-#define MAX_POLYTOPE_FACES 512
-#define MAX_POLYTOPE_POINTS 512
-#define MAX_POLYTOPE_EDGES 512
+#define MAX_POLYTOPE_FACES 16
+#define MAX_POLYTOPE_POINTS 16
+#define MAX_POLYTOPE_EDGES 16
 
 typedef struct _PPPolytope {
     PPSupportPoint points[MAX_POLYTOPE_POINTS];
@@ -2022,7 +2095,8 @@ void pp_physics_step(float t) {
                     }
 
                     if (respond) {
-                        pp_sphere_sphere_response(lhs_sphere, rhs_sphere, &c);
+                        // pp_sphere_sphere_response(lhs_sphere, rhs_sphere, &c);
+                        pp_solve(&c);
                     }
                 }
             } else if((lhs_sphere && rhs_box) || (rhs_sphere && lhs_box)) {
@@ -2043,7 +2117,8 @@ void pp_physics_step(float t) {
                     }
 
                     if (respond) {
-                        pp_sphere_box_response(sphere, box, &c, t);
+                        // pp_sphere_box_response(sphere, box, &c, t);
+                        pp_solve(&c);
                     }
                 }
             }

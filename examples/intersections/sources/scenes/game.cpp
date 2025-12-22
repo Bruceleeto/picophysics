@@ -130,7 +130,7 @@ bool dont_collide(
     smlt::Vec3 normal(c->n.x, c->n.y, c->n.z);
     scene->debug_->draw_point(point, smlt::Color::red());
     scene->debug_->draw_line(point, point + normal, smlt::Color::green());
-    return false;
+    return true;
 }
 
 void GameScene::on_load() {
