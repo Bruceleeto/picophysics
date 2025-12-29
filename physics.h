@@ -229,15 +229,14 @@ size_t pp_physics_triangle_count();
 const PPTriangle* pp_physics_triangle_at(size_t i);
 
 PPSphere* pp_physics_create_sphere(float radius, const PPVec3* pos, float mass, BodyKind kind);
-void pp_physics_destroy_sphere(PPSphere* s);
 float pp_sphere_get_radius(const PPSphere* s);
 
 PPBox* pp_physics_create_box(float width, float height, float depth, const PPVec3* pos, float mass, BodyKind kind);
-void pp_physics_destroy_box(PPBox* s);
 float pp_box_get_width(const PPBox* b);
 float pp_box_get_height(const PPBox* b);
 float pp_box_get_depth(const PPBox* b);
 
+void pp_physics_destroy_body(PPBody* b);
 const PPBody* pp_physics_body_at(size_t i);
 size_t pp_physics_body_count();
 size_t pp_physics_body_total_count();
@@ -895,6 +894,10 @@ void pp_body_set_position(PPBody *s, float x, float y, float z) {
     pp_vec3_set(&s->pos, x, y, z);
 }
 
+void pp_body_set_rotation(PPBody *s, float x, float y, float z, float w) {
+    pp_quat_set(&s->rot, x, y, z, w);
+}
+
 void pp_body_get_velocity_at_position(const PPBody* b, const PPVec3* p, PPVec3* ret) {
     PPVec3 rel_pos, local_rel_pos, a_vel_contrib;
     pp_vec3_sub(p, &b->pos, &rel_pos);
@@ -940,16 +943,15 @@ void pp_body_add_angular_force(PPBody* s, float tx, float ty, float tz)
     PPVec3 torque;
     pp_vec3_set(&torque, tx, ty, tz);
 
-    if(PP_SPHERE(s)) {
-        // Simplified inertia for Spheres
-        float I = s->inertia.m[0];
+    // FIXME: Implement for boxes!
+    // Simplified inertia for Spheres
+    float I = s->inertia.m[0];
 
-        if (I <= 0.0f) return;   // nothing to do for mass‑less or zero‑radius objects
+    if (I <= 0.0f) return;   // nothing to do for mass‑less or zero‑radius objects
 
-        PPVec3 ang_acc;
-        pp_vec3_scale(&torque, 1.0f / I, &ang_acc);
-        pp_vec3_add(&s->a_acc, &ang_acc, &s->a_acc);
-    }
+    PPVec3 ang_acc;
+    pp_vec3_scale(&torque, 1.0f / I, &ang_acc);
+    pp_vec3_add(&s->a_acc, &ang_acc, &s->a_acc);
 }
 
 const struct _PPCollisionMapEntry* pp_physics_collision_map_search(BodyKind kind1, BodyKind kind2) {
@@ -1121,8 +1123,8 @@ const PPTriangle* pp_physics_triangle_at(size_t i) {
     return tris + i;
 }
 
-void pp_physics_destroy_sphere(PPSphere* s) {
-    s->body.is_alive = false;
+void pp_physics_destroy_body(PPBody* b) {
+    b->is_alive = false;
     ++dead_object_count;
 }
 
