@@ -83,6 +83,8 @@
 #include <string.h>
 #include <assert.h>
 
+#define EPA_DEBUG 0
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -1852,9 +1854,11 @@ bool pp_epa(PPSimplex *simplex,
     PPVec3 *min_normal = NULL;
     float min_distance = FLT_MAX;
     while(min_distance == FLT_MAX) {
+#if EPA_DEBUG
         char filename[100];
         sprintf(filename, "%d.obj", iterations);
         pp_polytope_write(&polytope, filename);
+#endif
 
         min_normal = &polytope.faces[min_face].n;
         min_distance = polytope.faces[min_face].d;
