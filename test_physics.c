@@ -101,7 +101,7 @@ int main(int argc, char* argv[]) {
     CHECK(lhs->body.pos.xyz[0] == -1.0f, "Unexpected position\n");
     CHECK(rhs->body.pos.xyz[0] == 1.0f, "Unexpected position\n");
 
-    pp_physics_destroy_sphere(rhs);
+    pp_physics_destroy_body(PP_BODY(rhs));
     CHECK(rhs->body.is_alive == false, "Sphere unexpectedly alive\n");
 
     PPVec3 v3;
@@ -130,7 +130,7 @@ int main(int argc, char* argv[]) {
 
     CHECK(pp_physics_body_count() == 2, "Incorrect sphere count");
     CHECK(pp_physics_body_total_count() == 2, "Incorrect sphere count");
-    pp_physics_destroy_sphere(lhs);
+    pp_physics_destroy_body(PP_BODY(lhs));
     CHECK(pp_physics_body_count() == 1, "Incorrect sphere count");
     CHECK(pp_physics_body_total_count() == 2, "Incorrect sphere count");
     lhs = pp_physics_create_sphere(1.0f, &p1, 1, 0);
