@@ -43,6 +43,15 @@
  * If you need more than that you can define PHYSICS_MAX_OBJECTS or PHYSICS_MAX_TRIANGLES
  * before including physics.h.
  *
+ * # Support
+ *
+ * Although this is an open-source project, I do not have the time to provide support for it. If you send me an MR
+ * I'll review it and merge it if it's good - that's about as much as I can do. This has been written for my own purposes
+ * primarily.
+ *
+ * If you find this project useful in some way, please consider buying me a coffee at https://ko-fi.com/kazade or supporting me
+ * on Patreon at https://www.patreon.com/kazade
+ *
  * # Help needed!
  *
  * I am *not* a mathematician! Collision response is something I'm finding quite
