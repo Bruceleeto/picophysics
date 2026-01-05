@@ -8,7 +8,7 @@
  *
  * # Features
  *
- * - Create fully sphere dynamic spheres and apply linear and angular forces
+ * - Create fully dynamic spheres and boxes and apply linear and angular forces
  * - Create environments using triangles and boxes
  * - Easy to use collision callback system to respond to detected collisions and to
  *   choose whether to respond at at all (return true to respond)
@@ -53,10 +53,15 @@
  *
  * # Roadmap
  *
- * - Add collision response for Boxes
+ * - Add proper angular collision response
+ * - Proper manifold generation for GJK/EPA
+ * - Allow objects to be marked as static
+ * - Broad-phase collision detection (spatial hashing)
  * - Add fixed and spring joints (links) between objects
  * - Simplify/share collision response logic across all things
  * - Optimisations (replacing divisions where possible)
+ * - Slab allocation (so it's possible to overflow the static array)
+ * - Make structs opaque
  *
  * I have no intention of adding more than this! If you want something more there are a bunch
  * of great open-source physics engines out there (e.g. Bullet, Box2D, ODE, Bounce..)
@@ -72,6 +77,12 @@
  * CHANGELOG
  *
  * - ALPHA - no releases yet
+ *
+ * The MIT License (MIT)
+ * Copyright © 2026 Luke Benstead
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+ * The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+ * THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
 #ifndef PICOPHYSICS_H
