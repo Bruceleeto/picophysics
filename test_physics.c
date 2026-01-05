@@ -145,6 +145,9 @@ int main(int argc, char* argv[]) {
 
     pp_physics_step(1.0f / 60.0f);
 
+    fprintf(stderr, "Position of b1: %f, %f, %f\n", b1->body.pos.xyz[0], b1->body.pos.xyz[1], b1->body.pos.xyz[2]);
+    fprintf(stderr, "Position of s1: %f, %f, %f\n", s1->body.pos.xyz[0], s1->body.pos.xyz[1], s1->body.pos.xyz[2]);
+
     CHECK(b1->body.pos.xyz[0] == -0.75f, "Unexpected position\n");  // Boxes don't move
     CHECK(s1->body.pos.xyz[0] == 0.75f, "Unexpected position\n");
 

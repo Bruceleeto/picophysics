@@ -1143,8 +1143,9 @@ static void pp_solve(const PPCollision* manifold) {
 
     PPVec3 adjustment_lhs, adjustment_rhs;
 
-    float vel_along_normal;
-    PPVec3 rel_vel;
+    float vel_along_normal = 0.0f;
+    PPVec3 rel_vel = {.xyz={0.0f, 0.0f, 0.0f}};
+
     if(rhs) {
         pp_vec3_scale(&manifold->n, overlap * 0.5f, &adjustment_lhs);
         pp_vec3_scale(&manifold->n, overlap * 0.5f, &adjustment_rhs);
@@ -1315,8 +1316,8 @@ typedef struct _PPPolytopeEdge {
 } PPPolytopeEdge;
 
 #define MAX_POLYTOPE_FACES 64
-#define MAX_POLYTOPE_POINTS 64
-#define MAX_POLYTOPE_EDGES 64
+#define MAX_POLYTOPE_POINTS 128
+#define MAX_POLYTOPE_EDGES 32
 
 typedef struct _PPPolytope {
     PPSupportPoint points[MAX_POLYTOPE_POINTS];
@@ -1514,26 +1515,34 @@ void pp_find_furthest_point_sphere(const PPSphere* sphere, const PPVec3* directi
 }
 
 void pp_find_furthest_point_box(const PPBox* box, const PPVec3* direction, PPVec3* point) {
-    PPVec3 extents = {.xyz={box->whd.x * 0.5f, box->whd.y * 0.5f, box->whd.z * 0.5f}};
-    PPVec3 axes[3] = {
-        {.xyz={extents.x, 0.0f, 0.0f}},
-        {.xyz={0.0f, extents.y, 0.0f}},
-        {.xyz={0.0f, 0.0f, extents.z}}
-    };
+    PPVec3 extents = {0};
+    extents.x = box->whd.x * 0.5f;
+    extents.y = box->whd.y * 0.5f;
+    extents.z = box->whd.z * 0.5f;
 
-    pp_quat_transform(&box->body.rot, &axes[0], &axes[0]);
-    pp_quat_transform(&box->body.rot, &axes[1], &axes[1]);
-    pp_quat_transform(&box->body.rot, &axes[2], &axes[2]);
+    PPVec3 vertices[8];
 
-    PPVec3 support_point;
-    for(int i = 0; i < 3; ++i) {
-        if(pp_same_direction(&axes[i], direction)) {
-            pp_vec3_add(&support_point, &axes[i], &support_point);
-        } else {
-            pp_vec3_sub(&support_point, &axes[i], &support_point);
+    for(int i = 0; i < 8; ++i) {
+        vertices[i].xyz[0] = (i & 1) ? extents.x : -extents.x;
+        vertices[i].xyz[1] = (i & 2) ? extents.y : -extents.y;
+        vertices[i].xyz[2] = (i & 4) ? extents.z : -extents.z;
+
+        pp_quat_transform(&box->body.rot, &vertices[i], &vertices[i]);
+        pp_vec3_add(&vertices[i], &box->body.pos, &vertices[i]);
+    }
+
+    float max_dot = pp_vec3_dot(direction, &vertices[0]);
+    int max_index = 0;
+
+    for(int i = 1; i < 8; ++i) {
+        float dot = pp_vec3_dot(direction, &vertices[i]);
+        if(dot > max_dot) {
+            max_dot = dot;
+            max_index = i;
         }
     }
-    pp_vec3_add(&box->body.pos, &support_point, point);
+
+    pp_vec3_assign(point, &vertices[max_index]);
 }
 
 bool pp_gjk_support(const PPBody* b1, const PPBody* b2, const PPVec3* direction, PPSupportPoint* out) {
@@ -1660,7 +1669,7 @@ bool pp_polytope_calc_face_normal(PPPolytope* polytope, PPPolytopeFace* face) {
     pp_vec3_cross(&ab, &ac, &face->n);
 
     bool ret = pp_vec3_normalize(&face->n);
-    assert(ret); // This should always be a valid normal
+    // assert(ret); // This should always be a valid normal
 
     if (!ret) {
         return false;
@@ -1689,9 +1698,11 @@ float pp_polytope_push_face(PPPolytope* polytope, uint8_t a, uint8_t b, uint8_t 
     new_face->b = b;
     new_face->c = c;
 
+    // If the face is degenerate, skip it
     if (!pp_polytope_calc_face_normal(polytope, new_face)) {
-        return 0.0f;
+        return FLT_MAX;
     }
+
     polytope->face_count++;
     return new_face->d;
 }
@@ -1775,6 +1786,8 @@ bool pp_epa(PPSimplex *simplex,
             float *intersection,
             PPVec3 *contact)
 {
+    assert(simplex->count == 4);
+
     const PPSupportPoint *a = pp_simplex_at(simplex, 0);
     const PPSupportPoint *b = pp_simplex_at(simplex, 1);
     const PPSupportPoint *c = pp_simplex_at(simplex, 2);
@@ -1802,15 +1815,14 @@ bool pp_epa(PPSimplex *simplex,
         return false;
     }
 
-    int iterations = 0;
-    const int MAX_ITERATIONS = 5;
+    const int MAX_ITERATIONS = 10;
 
     PPPolytopeFace* min_face_ptr = NULL;
     for(int i = 0; i < MAX_ITERATIONS; ++i) {
         min_face_ptr = &polytope.faces[min_face];
 
         char filename[100];
-        sprintf(filename, "%d.obj", iterations);
+        sprintf(filename, "%d.obj", i);
         pp_polytope_write(&polytope, filename);
 
         PPSupportPoint support;
@@ -1820,14 +1832,19 @@ bool pp_epa(PPSimplex *simplex,
             continue;
         }
 
-        float s_dist = fabsf(pp_vec3_dot(&support.point, &min_face_ptr->n));
+        float s_dist = pp_vec3_dot(&support.point, &min_face_ptr->n);
 
-        bool expand = fabsf(s_dist - min_face_ptr->d) > 0.001f;
+        // If the support point is further from the origin than the
+        // current min face, then we need to expand the polytope
+        bool expand = s_dist > min_face_ptr->d + 0.001f;
         if (expand) {
             pp_polytope_clear_edges(&polytope);
 
             for (size_t i = 0; i < polytope.face_count; ++i) {
-                if (pp_same_direction(&polytope.faces[i].n, &support.point)) {
+                PPVec3 dir;
+                pp_vec3_sub(&support.point, &polytope.points[polytope.faces[i].a].point, &dir);
+
+                if (pp_same_direction(&polytope.faces[i].n, &dir)) {
                     assert(polytope.faces[i].a != polytope.faces[i].b);
                     assert(polytope.faces[i].a != polytope.faces[i].c);
 
@@ -1842,6 +1859,7 @@ bool pp_epa(PPSimplex *simplex,
             }
 
             if (!polytope.edge_count) {
+                fprintf(stderr, "No edges found\n");
                 break;
             }
 
@@ -1859,8 +1877,8 @@ bool pp_epa(PPSimplex *simplex,
                                       polytope.edges[i].b,
                                       new_point_index);
 
-                if(d < min_face_ptr->d) {
-                    min_face = new_face_index + i;
+                if(d < (min_face_ptr->d - 0.001f)) {
+                    min_face = polytope.face_count - 1;
                     min_face_ptr = &polytope.faces[min_face];
                 }
             }
@@ -1901,13 +1919,78 @@ static inline bool flt_close(const float a, const float b) {
 }
 
 bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* contact_point, PPVec3* n, float* intersection) {
-    PPSimplex simplex;
-    if(pp_gjk_collide(PP_BODY(lhs), PP_BODY(rhs), pp_simplex_init(&simplex))) {
-        pp_epa(&simplex, PP_BODY(lhs), PP_BODY(rhs), n, intersection, contact_point);
-        return true;
+    PPVec3 diff;
+    pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &diff);
+
+    float diff_dist_sq = pp_vec3_dot(&diff, &diff);
+    float sphere_radius = lhs->radius;
+    float box_radius = rhs->radius;
+
+    if (diff_dist_sq > (sphere_radius + box_radius) * (sphere_radius + box_radius)) {
+        return false;
     }
 
-    return false;
+    PPVec3 sphere_center_local;
+    PPVec3 box_center = rhs->body.pos;
+    PPVec3 sphere_center = lhs->body.pos;
+    PPVec3 tmp;
+    pp_vec3_sub(&sphere_center, &box_center, &tmp);
+
+    // Inverse rotate by box orientation
+    PPQuaternion box_rot = rhs->body.rot;
+    PPQuaternion box_rot_inv = box_rot;
+    box_rot_inv.x = -box_rot.x;
+    box_rot_inv.y = -box_rot.y;
+    box_rot_inv.z = -box_rot.z;
+
+    pp_quat_transform(&box_rot_inv, &tmp, &sphere_center_local);
+
+    // Clamp sphere center to box extents (local space)
+    PPVec3 half_extents = { rhs->whd.x * 0.5f, rhs->whd.y * 0.5f, rhs->whd.z * 0.5f };
+    PPVec3 closest_local = sphere_center_local;
+    if (closest_local.x < -half_extents.x) closest_local.x = -half_extents.x;
+    if (closest_local.x >  half_extents.x) closest_local.x =  half_extents.x;
+    if (closest_local.y < -half_extents.y) closest_local.y = -half_extents.y;
+    if (closest_local.y >  half_extents.y) closest_local.y =  half_extents.y;
+    if (closest_local.z < -half_extents.z) closest_local.z = -half_extents.z;
+    if (closest_local.z >  half_extents.z) closest_local.z =  half_extents.z;
+
+    // Compute vector from closest point to sphere center (local space)
+    PPVec3 delta_local;
+    pp_vec3_sub(&sphere_center_local, &closest_local, &delta_local);
+    float dist_sq = pp_vec3_dot(&delta_local, &delta_local);
+    float radius = lhs->radius;
+
+    if (dist_sq > radius * radius) {
+        return false;
+    }
+
+    // Transform contact point back to world space
+    PPVec3 contact_world;
+    pp_quat_transform(&rhs->body.rot, &closest_local, &contact_world);
+    pp_vec3_add(&contact_world, &rhs->body.pos, contact_point);
+
+    // Penetration depth
+    float dist = sqrtf(dist_sq);
+    if (intersection){
+        *intersection = radius - dist;
+    }
+
+    if (n) {
+        PPVec3 normal_local;
+        if (dist > 1e-6f) {
+            pp_vec3_scale(&delta_local, 1.0f / dist, &normal_local);
+        } else {
+            // Sphere center is inside box, pick arbitrary normal (e.g., x axis)
+            pp_vec3_set(&normal_local, 1.0f, 0.0f, 0.0f);
+        }
+        // Rotate normal to world space
+        pp_quat_transform(&rhs->body.rot, &normal_local, n);
+        pp_vec3_normalize(n);
+    }
+
+    return true;
+
 }
 
 void pp_physics_step(float t) {
@@ -2057,7 +2140,7 @@ void pp_physics_step(float t) {
                 if(pp_tri_intersect(tri, &lhs_body->pos, &d, &p, &dist)) {
                     if(dist <= lhs_sphere->radius) {
                         PPCollision c;
-                        pp_fill_collision_info_sphere_triangle(lhs_sphere, tri, &p, dist, &c);
+                        pp_fill_collision_info_sphere_triangle(lhs_sphere, tri, &p, lhs_sphere->radius - dist, &c);
 
                         bool respond = true;
                         const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
