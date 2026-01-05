@@ -68,6 +68,10 @@
  *
  * #define PICOPHYSICS_IMPLEMENTATION
  * #include "picophysics.h"
+ *
+ * CHANGELOG
+ *
+ * - ALPHA - no releases yet
  */
 
 #ifndef PICOPHYSICS_H
