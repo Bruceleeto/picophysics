@@ -1,0 +1,12 @@
+[
+  {
+    "label": "Build",
+    "command": "gcc test_physics.c -o test_physics -lm -g",
+    "use_new_terminal": false,
+  },
+  {
+    "label": "Run",
+    "command": "gcc test_physics.c -o test_physics -lm -g && ./test_physics",
+    "use_new_terminal": false,
+  },
+]
