@@ -8,7 +8,7 @@
  *
  * # Features
  *
- * - Create fully sphere dynamic spheres and apply linear and angular forces
+ * - Create fully dynamic spheres and boxes and apply linear and angular forces
  * - Create environments using triangles and boxes
  * - Easy to use collision callback system to respond to detected collisions and to
  *   choose whether to respond at at all (return true to respond)
@@ -22,7 +22,7 @@
  * Picophysics only supports the following primitives:
  *
  * - Spheres (fully dynamic and responsive)
- * - Boxes (currently kinematic, for platforms / obstacles etc.)
+ * - Boxes (only collides with other boxes and spheres)
  * - Triangles (static environment)
  *
  * Bodies are not composable; there's no separation between a body and a collider like in other
@@ -43,6 +43,15 @@
  * If you need more than that you can define PHYSICS_MAX_OBJECTS or PHYSICS_MAX_TRIANGLES
  * before including physics.h.
  *
+ * # Support
+ *
+ * Although this is an open-source project, I do not have the time to provide support for it. If you send me an MR
+ * I'll review it and merge it if it's good - that's about as much as I can do. This has been written for my own purposes
+ * primarily.
+ *
+ * If you find this project useful in some way, please consider buying me a coffee at https://ko-fi.com/kazade or supporting me
+ * on Patreon at https://www.patreon.com/kazade
+ *
  * # Help needed!
  *
  * I am *not* a mathematician! Collision response is something I'm finding quite
@@ -53,10 +62,15 @@
  *
  * # Roadmap
  *
- * - Add collision response for Boxes
+ * - Add proper angular collision response
+ * - Proper manifold generation for GJK/EPA
+ * - Allow objects to be marked as static
+ * - Broad-phase collision detection (spatial hashing)
  * - Add fixed and spring joints (links) between objects
  * - Simplify/share collision response logic across all things
  * - Optimisations (replacing divisions where possible)
+ * - Slab allocation (so it's possible to overflow the static array)
+ * - Make structs opaque
  *
  * I have no intention of adding more than this! If you want something more there are a bunch
  * of great open-source physics engines out there (e.g. Bullet, Box2D, ODE, Bounce..)
@@ -66,8 +80,18 @@
  * Picophysics is a single-file header library (in the spirit of stb). To use it
  * you must do this in a single .c/.cpp file:
  *
- * #define PHYSICS_IMPLEMENTATION
- * #include "physics.h"
+ * #define PICOPHYSICS_IMPLEMENTATION
+ * #include "picophysics.h"
+ *
+ * CHANGELOG
+ *
+ * - ALPHA - no releases yet
+ *
+ * The MIT License (MIT)
+ * Copyright © 2026 Luke Benstead
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+ * The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+ * THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
 #ifndef PICOPHYSICS_H
@@ -270,7 +294,9 @@ void pp_body_look_at(PPBody* s, float x, float y, float z);
 
 #endif
 
-#ifdef PHYSICS_IMPLEMENTATION
+#ifdef PICOPHYSICS_IMPLEMENTATION
+
+#define EPA_DEBUG 0
 
 #ifndef PHYSICS_MAX_OBJECTS
     #define PHYSICS_MAX_OBJECTS 32
@@ -1821,9 +1847,11 @@ bool pp_epa(PPSimplex *simplex,
     for(int i = 0; i < MAX_ITERATIONS; ++i) {
         min_face_ptr = &polytope.faces[min_face];
 
+#if EPA_DEBUG
         char filename[100];
         sprintf(filename, "%d.obj", i);
         pp_polytope_write(&polytope, filename);
+#endif
 
         PPSupportPoint support;
         bool ok = pp_gjk_support(lhs, rhs, &min_face_ptr->n, &support);
