@@ -1,7 +1,7 @@
 
 #include "game.h"
 
-#define PHYSICS_IMPLEMENTATION
+#define PICOPHYSICS_IMPLEMENTATION
 #include "../physics.h"
 
 #define BOX_KIND 1

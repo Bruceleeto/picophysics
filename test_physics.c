@@ -1,5 +1,5 @@
-#define PHYSICS_IMPLEMENTATION
-#include "physics.h"
+#define PICOPHYSICS_IMPLEMENTATION
+#include "picophysics.h"
 
 #define CHECK(expr, msg) \
     if(!(expr)) {        \

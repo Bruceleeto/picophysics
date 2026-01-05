@@ -270,7 +270,7 @@ void pp_body_look_at(PPBody* s, float x, float y, float z);
 
 #endif
 
-#ifdef PHYSICS_IMPLEMENTATION
+#ifdef PICOPHYSICS_IMPLEMENTATION
 
 #ifndef PHYSICS_MAX_OBJECTS
     #define PHYSICS_MAX_OBJECTS 32
