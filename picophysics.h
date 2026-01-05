@@ -276,6 +276,8 @@ void pp_body_look_at(PPBody* s, float x, float y, float z);
 
 #ifdef PICOPHYSICS_IMPLEMENTATION
 
+#define EPA_DEBUG 0
+
 #ifndef PHYSICS_MAX_OBJECTS
     #define PHYSICS_MAX_OBJECTS 32
 #endif
@@ -1825,9 +1827,11 @@ bool pp_epa(PPSimplex *simplex,
     for(int i = 0; i < MAX_ITERATIONS; ++i) {
         min_face_ptr = &polytope.faces[min_face];
 
+#if EPA_DEBUG
         char filename[100];
         sprintf(filename, "%d.obj", i);
         pp_polytope_write(&polytope, filename);
+#endif
 
         PPSupportPoint support;
         bool ok = pp_gjk_support(lhs, rhs, &min_face_ptr->n, &support);
