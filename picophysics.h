@@ -22,7 +22,7 @@
  * Picophysics only supports the following primitives:
  *
  * - Spheres (fully dynamic and responsive)
- * - Boxes (currently kinematic, for platforms / obstacles etc.)
+ * - Boxes (only collides with other boxes and spheres)
  * - Triangles (static environment)
  *
  * Bodies are not composable; there's no separation between a body and a collider like in other
@@ -66,8 +66,8 @@
  * Picophysics is a single-file header library (in the spirit of stb). To use it
  * you must do this in a single .c/.cpp file:
  *
- * #define PHYSICS_IMPLEMENTATION
- * #include "physics.h"
+ * #define PICOPHYSICS_IMPLEMENTATION
+ * #include "picophysics.h"
  */
 
 #ifndef PICOPHYSICS_H
