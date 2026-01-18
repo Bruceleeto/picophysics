@@ -664,6 +664,10 @@ bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, P
          }
      }
 
+     if(closest_dist == FLT_MAX) {
+         return false;
+     }
+
      if(body_hit) {
          *body_hit = closest_body;
      }
@@ -764,6 +768,43 @@ bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* 
 }
 
 bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance) {
+    // PPVec3 v0v1, v0v2, pvec;
+    // pp_vec3_sub(&tri->v[1], &tri->v[0], &v0v1);
+    // pp_vec3_sub(&tri->v[1], &tri->v[0], &v0v1);
+    // pp_vec3_cross(d, &v0v2, &pvec);
+    // float det = pp_vec3_dot(&v0v1, &pvec);
+
+    // // If the determinant is negative, the triangle is back-facing.
+    // // If the determinant is close to 0, the ray misses the triangle.
+    // // if (det < FLT_EPSILON) return false;
+
+    // // If det is close to 0, the ray and triangle are parallel.
+    // if (fabs(det) < FLT_EPSILON) {
+    //     return false;
+    // }
+
+    // float invDet = 1 / det;
+
+    // PPVec3 tvec;
+    // pp_vec3_sub(o, &tri->v[0], &tvec);
+    // float u = pp_vec3_dot(&tvec, &pvec) * invDet;
+
+    // if (u < 0 || u > 1) {
+    //     return false;
+    // }
+
+    // PPVec3 qvec;
+    // pp_vec3_cross(&tvec, &v0v1, &qvec);
+
+    // float v = pp_vec3_dot(d, &qvec) * invDet;
+    // if (v < 0 || u + v > 1) {
+    //     return false;
+    // }
+
+    // float t = pp_vec3_dot(&v0v2, &qvec) * invDet;
+
+    // return true;
+
     const float e = FLT_EPSILON;
     PPVec3 edge1, edge2, cross_e1, cross_e2, s;
     pp_vec3_sub(&tri->v[1], &tri->v[0], &edge1);

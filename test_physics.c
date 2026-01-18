@@ -181,5 +181,17 @@ int main(int argc, char* argv[]) {
     CHECK(CLOSE(intersection.x, ray_box_pos.x), "Unexpected intersection x\n");
     CHECK(CLOSE(intersection.y, ray_box_pos.y), "Unexpected intersection y\n");
     CHECK(CLOSE(intersection.z, ray_box_pos.z + 0.5f), "Unexpected intersection z\n");
+
+    ro2.x = -0.49f;
+
+    CHECK(pp_physics_ray_intersect(&ro2, &rd2, &hit, &tri_hit, &ray_dist, &intersection), "Ray intersection failed\n");
+
+    CHECK(CLOSE(intersection.x, ray_box_pos.x - 0.49f), "Unexpected intersection x\n");
+    CHECK(CLOSE(intersection.y, ray_box_pos.y), "Unexpected intersection y\n");
+    CHECK(CLOSE(intersection.z, ray_box_pos.z + 0.5f), "Unexpected intersection z\n");
+
+    PPQuaternion yaw45 = {.xyzw={0.924f, 0.0f, 0.0f, 0.383f}};
+    pp_body_set_rotation(PP_BODY(ray_box), yaw45.x, yaw45.y, yaw45.z, yaw45.w);
+
     return 0;
 }
