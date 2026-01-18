@@ -574,10 +574,10 @@ bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, P
  * If a hit was detected, then either sphere_hit or tri_hit will be populated (depending on what was hit) and the distance from the
  * origin to the hit will be returned.
  */
-bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance) {
+bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPBody** body_hit, PPTriangle** tri_hit, float* distance) {
     float closest_dist = FLT_MAX;
     const PPTriangle* closest_tri = NULL;
-    const PPSphere* closest_sphere = NULL;
+    const PPBody* closest_body = NULL;
 
     for(int i = 0; i < pp_physics_triangle_count(); ++i) {
         const PPTriangle* t = pp_physics_triangle_at(i);
@@ -594,27 +594,88 @@ bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPS
 
     for(int i = 0; i < pp_physics_body_total_count(); ++i) {
         const PPBody* body = pp_physics_body_at(i);
-        const PPSphere* s = PP_SPHERE(body);
-
-        if(!s || !body->is_alive) {
+        if(!body->is_alive) {
             continue;
         }
 
-        PPVec3 hit;
-        float dist;
-        if(pp_sphere_intersect(s, origin, direction, &hit, &dist)) {
-            if(dist < closest_dist) {
-                closest_sphere = s;
-                closest_tri = NULL;
-                closest_dist = dist;
+        if(body->type == PP_BODY_TYPE_SPHERE) {
+            const PPSphere* s = PP_SPHERE(body);
+
+            assert(s);
+            PPVec3 hit;
+            float dist;
+            if(pp_sphere_intersect(s, origin, direction, &hit, &dist)) {
+                if(dist < closest_dist) {
+                    closest_body = body;
+                    closest_tri = NULL;
+                    closest_dist = dist;
+                }
+            }
+        } else if(body->type == PP_BODY_TYPE_BOX) {
+            const PPBox* b = PP_BOX(body);
+
+            assert(b);
+            PPVec3 hit;
+            float dist;
+            if(pp_box_intersect(b, origin, direction, &hit, &dist)) {
+                if(dist < closest_dist) {
+                    closest_body = body;
+                    closest_tri = NULL;
+                    closest_dist = dist;
+                }
             }
         }
     }
 
-    *sphere_hit = (PPSphere*) closest_sphere;
+    *body_hit = closest_body;
     *tri_hit = (PPTriangle*) closest_tri;
     *distance = closest_dist;
     return true;
+}
+
+bool pp_aabb_intersect(const PPVec3* pos, const PPVec3* whd, const PPVec3* origin, const PPVec3* direction, PPVec3* out, float* distance {
+    // Standard ray/AABB intersection
+    float tmin = -FLT_MAX;
+    float tmax = FLT_MAX;
+
+    for(int i = 0; i < 3; i++) {
+        float invDir = 1.0f / direction->data[i];
+        float t0 = (pos->data[i] - origin->data[i]) * invDir;
+        float t1 = (pos->data[i] + whd->data[i] - origin->data[i]) * invDir;
+
+        if(t0 > t1) {
+            float temp = t0;
+            t0 = t1;
+            t1 = temp;
+        }
+
+        tmin = (t0 > tmin) ? t0 : tmin;
+        tmax = (t1 < tmax) ? t1 : tmax;
+
+        if(tmax <= tmin) return false;
+    }
+
+    if(out) {
+        pp_vec3_scale(direction, tmin, out);
+        pp_vec3_add(out, origin, out);
+    }
+
+    if(distance) {
+        *distance = tmin;
+    }
+
+    return true;
+}
+
+bool pp_box_intersect(const PPBox* box, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance) {
+    // Transform the ray into the box's local space
+    PPVec3 local_origin;
+    PPVec3 local_direction;
+    pp_vec3_sub(o, &box->body.pos, &local_origin);
+    pp_vec3_rotate(&local_origin, &box->body.rot, &local_origin);
+    pp_vec3_rotate(d, &box->body.rot, &local_direction);
+
+    return pp_aabb_intersect(&box->body.pos, &box->whd, &local_origin, &local_direction, out, distance);
 }
 
 bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance) {

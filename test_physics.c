@@ -118,12 +118,12 @@ int main(int argc, char* argv[]) {
 
     CHECK(lhs->body.pos.xyz[1] == 1.0f, "Body position didn't move");
 
-    PPTriangle* ct;
-    PPSphere* cs;
+    const PPTriangle* ct;
+    const PPBody* cs;
     PPVec3 ro = (PPVec3){.xyz = {0, 5, 0}};
     PPVec3 rd = (PPVec3){.xyz = {0, -1, 0}};
     float dist;
-    CHECK(pp_physics_ray_intersect(&ro, &rd, &cs, &ct, &dist), "Ray didn't intersect");
+    CHECK(pp_physics_ray_intersect(&ro, &rd, &cs, &ct, &dist, NULL), "Ray didn't intersect");
     CHECK(CLOSE(dist, 5.0f), "Unexpected intersection distance");
 
     rhs = pp_physics_create_sphere(1.0f, &p2, 1, 0);
@@ -159,5 +159,27 @@ int main(int argc, char* argv[]) {
     CHECK(b1->body.pos.xyz[0] == 0.75f, "Unexpected position\n");  // Boxes don't move
     CHECK(s1->body.pos.xyz[0] == -0.75f, "Unexpected position\n");
 
+    // Ray intersections
+    pp_physics_clear();
+
+    PPVec3 ray_box_pos = {.xyz={0, 0, 0}};
+    PPBox* ray_box = pp_physics_create_box(1.0f, 1.0f, 1.0f, &ray_box_pos, 1.0f, 0);
+
+    PPVec3 ro2 = {.xyz = {0, 0, 5}};
+    PPVec3 rd2 = {.xyz = {0, 0, -1}};
+
+    const PPBody* hit = NULL;
+    const PPTriangle* tri_hit = NULL;
+    float ray_dist = 0.0f;
+    PPVec3 intersection;
+    CHECK(pp_physics_ray_intersect(&ro2, &rd2, &hit, &tri_hit, &ray_dist, &intersection), "Ray intersection failed\n");
+
+    // Check hit body and triangle
+    CHECK(hit == PP_BODY(ray_box), "Unexpected hit body\n");
+    CHECK(tri_hit == NULL, "Unexpected hit triangle\n");
+    CHECK(ray_dist == 4.5f, "Unexpected distance\n");
+    CHECK(CLOSE(intersection.x, ray_box_pos.x), "Unexpected intersection x\n");
+    CHECK(CLOSE(intersection.y, ray_box_pos.y), "Unexpected intersection y\n");
+    CHECK(CLOSE(intersection.z, ray_box_pos.z + 0.5f), "Unexpected intersection z\n");
     return 0;
 }
