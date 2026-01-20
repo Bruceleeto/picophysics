@@ -244,7 +244,7 @@ PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source);
 float pp_quat_angle_between(const PPQuaternion* q0, const PPQuaternion* q1);
 
 void pp_physics_step(float t);
-bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, const PPBody** body_hit, const PPTriangle** tri_hit, float* distance, PPVec3* intersection);
+bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, BodyKind* ignore_kinds, const PPBody** body_hit, const PPTriangle** tri_hit, float* distance, PPVec3* intersection);
 void pp_physics_clear();
 void pp_physics_set_gravity(const PPVec3* v);
 bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, void* user_data, bool (*callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c, const void*));
@@ -601,13 +601,30 @@ bool pp_box_intersect(const PPBox* sphere, const PPVec3* o, const PPVec3* d, PPV
 bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance);
 bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance);
 
+bool pp_contains_kind(BodyKind* kinds, BodyKind kind) {
+    if(!kinds) {
+        return false;
+    }
+
+    BodyKind* k = kinds;
+    while(*k) {
+        if(*k == kind) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /**
  * Intersects the world with the specified ray. Returns true if something was hit.
  *
  * If a hit was detected, then either sphere_hit or tri_hit will be populated (depending on what was hit) and the distance from the
  * origin to the hit will be returned.
+ *
+ * ignore_kinds is an array of kinds to ignore, with a 0 terminated final entry.
  */
- bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, const PPBody** body_hit, const PPTriangle** tri_hit, float* distance, PPVec3* intersection) {
+ bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, BodyKind* ignore_kinds, const PPBody** body_hit, const PPTriangle** tri_hit, float* distance, PPVec3* intersection) {
      float closest_dist = FLT_MAX;
      const PPTriangle* closest_tri = NULL;
      const PPBody* closest_body = NULL;
@@ -619,6 +636,10 @@ bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, P
          PPVec3 hit;
          float dist;
          if(pp_tri_intersect(t, origin, direction, &hit, &dist)){
+             if(pp_contains_kind(ignore_kinds, t->kind)) {
+                 continue;
+             }
+
              if(dist < closest_dist) {
                  closest_tri = t;
                  closest_dist = dist;
@@ -640,6 +661,10 @@ bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, P
              PPVec3 hit;
              float dist;
              if(pp_sphere_intersect(s, origin, direction, &hit, &dist)) {
+                 if(pp_contains_kind(ignore_kinds, s->body.kind)) {
+                     continue;
+                 }
+
                  if(dist < closest_dist) {
                      closest_body = body;
                      closest_tri = NULL;
@@ -654,6 +679,10 @@ bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, P
              PPVec3 hit;
              float dist;
              if(pp_box_intersect(b, origin, direction, &hit, &dist)) {
+                 if(pp_contains_kind(ignore_kinds, b->body.kind)) {
+                     continue;
+                 }
+
                  if(dist < closest_dist) {
                      closest_body = body;
                      closest_tri = NULL;
