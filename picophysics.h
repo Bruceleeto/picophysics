@@ -279,6 +279,8 @@ void pp_body_get_rotation(PPBody* s, PPQuaternion* rot);
 float pp_body_get_radius(PPBody* s);
 void pp_body_set_user_data(PPBody* s, void* data);
 void* pp_body_get_user_data(const PPBody* s);
+void pp_body_set_kind(PPBody* b, BodyKind kind);
+BodyKind pp_body_get_kind(const PPBody* b);
 bool pp_body_set_friction(PPBody* s, float f);
 void pp_body_get_velocity(const PPBody* s, PPVec3* vel);
 void pp_body_get_velocity_at_position(const PPBody* b, const PPVec3* p, PPVec3* ret);
@@ -875,6 +877,14 @@ bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, P
     }
 
     return true;
+}
+
+void pp_body_set_kind(PPBody* b, BodyKind kind) {
+    b->kind = kind;
+}
+
+BodyKind pp_body_get_kind(const PPBody* b) {
+    return b->kind;
 }
 
 void pp_body_set_angular_velocity(PPBody* s, float x, float y, float z) {
