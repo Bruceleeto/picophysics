@@ -1,0 +1,20 @@
+# Material file for mesh.obj
+
+newmtl BlackMaterial
+	Ns 250
+	d 1
+	illum 2
+	Kd 0.0 0.0 0.0
+	Ks 0.5 0.5 0.5
+	Ka 1.0 1.0 1.0
+	map_Kd ball.png
+
+newmtl WhiteMaterial
+	Ns 250
+	d 1
+	illum 2
+	Kd 0.8 0.8 0.8
+	Ks 0.5 0.5 0.5
+	Ka 1.0 1.0 1.0
+	map_Kd ball.png
+

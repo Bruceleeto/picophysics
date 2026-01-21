@@ -8,3 +8,8 @@ examples/intersections/libraries*
 examples/intersections/tools*
 examples/intersections/assets/simulant*
 examples/intersections/package*
+examples/stress/build*
+examples/stress/libraries*
+examples/stress/tools*
+examples/stress/assets/simulant*
+examples/stress/package*
