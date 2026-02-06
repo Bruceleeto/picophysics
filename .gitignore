@@ -3,3 +3,4 @@ examples/**/build*
 examples/**/libraries*
 examples/**/tools*
 examples/**/package*
+test_physics
