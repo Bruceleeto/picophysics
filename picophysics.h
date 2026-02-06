@@ -203,6 +203,9 @@ typedef struct _PPBody {
 
     bool is_alive;
     void* user_data;
+
+    float vel_limit;
+    float a_vel_limit;
 } PPBody;
 
 
@@ -236,6 +239,7 @@ PPVec3* pp_vec3_scale(const PPVec3* v1, float t, PPVec3* out);
 PPVec3* pp_vec3_assign(PPVec3* target, const PPVec3* source);
 bool pp_vec3_normalize(PPVec3* target);
 float pp_vec3_length(const PPVec3* v1);
+float pp_vec3_length_sq(const PPVec3* v1);
 
 PPQuaternion* pp_quat_init(PPQuaternion* q);
 void pp_quat_between(const PPVec3* v0, const PPVec3* q1, PPQuaternion* result);
@@ -289,6 +293,24 @@ void pp_body_set_velocity(PPBody* s, float x, float y, float z);
 void pp_body_set_angular_acceleration(PPBody* s, float x, float y, float z);
 void pp_body_set_acceleration(PPBody* s, float x, float y, float z);
 void pp_body_look_at(PPBody* s, float x, float y, float z);
+
+/**
+ * Limit the maximium velocity of the object. The limit will be applied after
+ * adding acceleration forces. Passing 0.0f will remove the limit.
+ *
+ * @param body The body whose velocity will be restricted
+ * @param speed A the desired velocity limit.
+ */
+void pp_body_limit_velocity(PPBody* body, float speed);
+
+/**
+ * Limit the maximium angular velocity of the object. The limit will be applied after
+ * adding acceleration forces. Passing 0.0f will remove the limit.
+ *
+ * @param body The body whose angular velocity will be restricted
+ * @param speed A the desired angular velocity limit.
+ */
+void pp_body_limit_angular_velocity(PPBody* body, float speed);
 
 #ifdef __cplusplus
 }
@@ -1007,6 +1029,22 @@ void pp_body_look_at(PPBody* s, float x, float y, float z) {
     pp_body_add_angular_force(s, torque.xyz[0], torque.xyz[1], torque.xyz[2]);
 }
 
+void pp_body_limit_velocity(PPBody* body, float speed) {
+    if(speed < 0.0f) {
+        return;
+    }
+
+    body->vel_limit = speed;
+}
+
+void pp_body_limit_angular_velocity(PPBody* body, float speed) {
+    if(speed < 0.0f) {
+        return;
+    }
+
+    body->a_vel_limit = speed;
+}
+
 static void pp_body_init(PPBody* body, const PPVec3* pos, float mass, BodyKind kind) {
     body->is_alive = true;
     body->user_data = NULL;
@@ -1023,6 +1061,8 @@ static void pp_body_init(PPBody* body, const PPVec3* pos, float mass, BodyKind k
     body->friction = 0.3f;
     body->damping = 0.01f;
     body->a_damping = 0.02f;
+    body->vel_limit = 0.0f;
+    body->a_vel_limit = 0.0f;
     pp_body_set_bounce(body, 0.5f);
 }
 
@@ -1377,96 +1417,6 @@ static void pp_solve(const PPCollision* manifold) {
             pp_vec3_scale(&impulse, rhs->inv_mass, &dv_rhs);
             pp_vec3_sub(&rhs->vel, &dv_rhs, &rhs->vel);   // v_rhs ← v_rhs + Δv
         }
-    }
-}
-
-static void pp_sphere_box_response(PPSphere* sphere, PPBox* box, const PPCollision* c, float t) {
-    // c->dist is the distance between the sphere center and the contact point
-    // so the "overlap" is the radius minus the distance
-    float overlap = sphere->radius - c->dist;
-
-    PPVec3 adjustment_lhs, adjustment_rhs;
-    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_lhs);
-    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_rhs);
-    pp_vec3_add(&sphere->body.pos, &adjustment_lhs, &sphere->body.pos);
-    pp_vec3_sub(&box->body.pos, &adjustment_rhs, &box->body.pos);
-
-    PPVec3 rel_vel;
-    pp_vec3_sub(&box->body.vel, &sphere->body.vel, &rel_vel);   // v_rhs – v_lhs
-    float vel_along_normal = pp_vec3_dot(&rel_vel, &c->n);
-    if (vel_along_normal < 0) {
-        PPVec3 penetration, tangent;
-        pp_vec3_scale(&c->n, vel_along_normal, &penetration);
-        pp_vec3_sub(&rel_vel, &penetration, &tangent);
-
-        // Moving towards each other
-        float r = fmax(sphere->body.bounce, box->body.bounce);
-        float f = fmin(sphere->body.friction, box->body.friction);
-
-        float inv_mass_sum = sphere->body.inv_mass + box->body.inv_mass;
-        float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
-        PPVec3 impulse_n;
-        pp_vec3_scale(&c->n, j_n, &impulse_n);
-
-        float jt = -pp_vec3_dot(&rel_vel, &tangent) / inv_mass_sum;
-        jt = fmax(-j_n * f, fmin(jt, j_n * f));   // clamp to μ·|j_n|
-        PPVec3 impulse_t;
-        pp_vec3_normalize(&tangent);      // ensure unit tangent
-        pp_vec3_scale(&tangent, jt, &impulse_t);
-
-        PPVec3 impulse;
-        pp_vec3_add(&impulse_n, &impulse_t, &impulse);
-
-        PPVec3 dv_lhs, dv_rhs;
-        pp_vec3_scale(&impulse, sphere->body.inv_mass, &dv_lhs);
-        pp_vec3_scale(&impulse, box->body.inv_mass, &dv_rhs);
-
-        pp_vec3_add(&sphere->body.vel, &dv_lhs, &sphere->body.vel);   // v_lhs ← v_lhs + Δv
-        pp_vec3_sub(&box->body.vel, &dv_rhs, &box->body.vel);   // v_rhs ← v_rhs + Δv
-    }
-}
-
-static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPCollision* c) {
-    float overlap = (lhs->radius + rhs->radius) - c->dist;
-
-    PPVec3 adjustment_lhs, adjustment_rhs;
-    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_lhs);
-    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_rhs);
-    pp_vec3_add(&lhs->body.pos, &adjustment_lhs, &lhs->body.pos);
-    pp_vec3_sub(&rhs->body.pos, &adjustment_rhs, &rhs->body.pos);
-
-    PPVec3 rel_vel;
-    pp_vec3_sub(&rhs->body.vel, &lhs->body.vel, &rel_vel);   // v_rhs – v_lhs
-    float vel_along_normal = pp_vec3_dot(&rel_vel, &c->n);
-    if (vel_along_normal < 0) {
-        PPVec3 penetration, tangent;
-        pp_vec3_scale(&c->n, vel_along_normal, &penetration);
-        pp_vec3_sub(&rel_vel, &penetration, &tangent);
-
-        // Moving towards each other
-        float r = fmax(lhs->body.bounce, rhs->body.bounce);
-        float f = fmin(lhs->body.friction, rhs->body.friction);
-
-        float inv_mass_sum = lhs->body.inv_mass + rhs->body.inv_mass;
-        float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
-        PPVec3 impulse_n;
-        pp_vec3_scale(&c->n, j_n, &impulse_n);
-
-        float jt = -pp_vec3_dot(&rel_vel, &tangent) / inv_mass_sum;
-        jt = fmax(-j_n * f, fmin(jt, j_n * f));   // clamp to μ·|j_n|
-        PPVec3 impulse_t;
-        pp_vec3_normalize(&tangent);      // ensure unit tangent
-        pp_vec3_scale(&tangent, jt, &impulse_t);
-
-        PPVec3 impulse;
-        pp_vec3_add(&impulse_n, &impulse_t, &impulse);
-
-        PPVec3 dv_lhs, dv_rhs;
-        pp_vec3_scale(&impulse, lhs->body.inv_mass, &dv_lhs);
-        pp_vec3_scale(&impulse, rhs->body.inv_mass, &dv_rhs);
-
-        pp_vec3_add(&lhs->body.vel, &dv_lhs, &lhs->body.vel);   // v_lhs ← v_lhs + Δv
-        pp_vec3_sub(&rhs->body.vel, &dv_rhs, &rhs->body.vel);   // v_rhs ← v_rhs + Δv
     }
 }
 
@@ -2227,6 +2177,17 @@ void pp_physics_step(float t) {
 
         // Reset the acceleration
         pp_vec3_init(&body->a_acc);
+
+        // Apply any limits
+        if(body->vel_limit != 0.0f && pp_vec3_length_sq(&body->vel) > body->vel_limit) {
+            pp_vec3_normalize(&body->vel);
+            pp_vec3_scale(&body->vel, body->vel_limit, &body->vel);
+        }
+
+        if(body->a_vel_limit != 0.0f && pp_vec3_length_sq(&body->a_vel) > body->a_vel_limit) {
+            pp_vec3_normalize(&body->a_vel);
+            pp_vec3_scale(&body->a_vel, body->a_vel_limit, &body->a_vel);
+        }
     }
 
     // Move all spheres by their velocity
