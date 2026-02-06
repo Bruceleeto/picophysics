@@ -1,7 +1,7 @@
 
 #include "game.h"
 
-#define PHYSICS_IMPLEMENTATION
+#define PICOPHYSICS_IMPLEMENTATION
 #include "../physics.h"
 
 #define CAR_BODY_KIND 1
@@ -122,12 +122,13 @@ void define_stadium()
     pp_physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
 }
 
-bool dont_collide(const void *, const void *, BodyKind, BodyKind, const PPCollision *)
+bool dont_collide(const void *, const void *, BodyKind, BodyKind, const PPCollision *, const void *)
 {
     return false;
 }
 
-bool ground_check(const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c)
+bool ground_check(
+    const void *lhs, const void *rhs, BodyKind k0, BodyKind, const PPCollision *, const void *)
 {
     // Abuse the user data pointer to store the grounded flag
     if (k0 == CAR_INNER_KIND) {
@@ -139,7 +140,7 @@ bool ground_check(const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, co
 }
 
 bool ball_car_collision(
-    const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c)
+    const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c, const void *)
 {
     // PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
     // PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
@@ -165,11 +166,11 @@ void rotate_to_direction(PPBox *sphere, const PPVec3 *target_forward, float dt)
 }
 
 void GameScene::on_load() {
-    pp_physics_collision_map_add(CAR_BODY_KIND, CAR_INNER_KIND, &dont_collide);
-    pp_physics_collision_map_add(CAR_INNER_KIND, BALL_KIND, &dont_collide);
-    pp_physics_collision_map_add(CAR_BODY_KIND, ENV_FLOOR_KIND, &dont_collide);
-    pp_physics_collision_map_add(CAR_INNER_KIND, ENV_FLOOR_KIND, &ground_check);
-    pp_physics_collision_map_add(CAR_BODY_KIND, BALL_KIND, &ball_car_collision);
+    pp_physics_collision_map_add(CAR_BODY_KIND, CAR_INNER_KIND, NULL, &dont_collide);
+    pp_physics_collision_map_add(CAR_INNER_KIND, BALL_KIND, NULL, &dont_collide);
+    pp_physics_collision_map_add(CAR_BODY_KIND, ENV_FLOOR_KIND, NULL, &dont_collide);
+    pp_physics_collision_map_add(CAR_INNER_KIND, ENV_FLOOR_KIND, NULL, &ground_check);
+    pp_physics_collision_map_add(CAR_BODY_KIND, BALL_KIND, NULL, &ball_car_collision);
 
     auto car_mesh2 = assets->load_mesh("assets/car/sedan-sports.obj");
     float cs = 1.0f / car_mesh2->aabb().max_dimension();
@@ -188,7 +189,7 @@ void GameScene::on_load() {
     pp_body_set_user_data(PP_BODY(cars_[0].body), cars_[0].roll_body);
 
     pp_body_lock_axis(PP_BODY(cars_[0].body), PP_AXIS_LOCK_PITCH_AND_ROLL);
-    pp_body_set_angular_damping(PP_BODY(cars_[0].body), 0.25f);
+    pp_body_set_angular_damping(PP_BODY(cars_[0].body), 0.95f);
 
     auto tex = assets->load_texture("assets/sand.png");
     auto floor_mat = assets->load_material(smlt::Material::BuiltIns::TEXTURE_ONLY);
@@ -303,7 +304,7 @@ void GameScene::on_update(float dt) {
     float thrust = pp_vec3_length(&drive_force);
 
     if (fabs(thrust) > 0.0001f) {
-        rotate_to_direction(cars_[0].body, &drive_force, smlt::clamp(10.0f * dt, 0.0f, 1.0f));
+        rotate_to_direction(cars_[0].body, &drive_force, smlt::clamp(5.0f * dt, 0.0f, 1.0f));
     }
 
     PPVec3 f;
@@ -311,7 +312,7 @@ void GameScene::on_update(float dt) {
 
     bool grounded = (bool) pp_body_get_user_data(PP_BODY(cars_[0].roll_body));
     if (grounded) {
-        pp_vec3_scale(&f, thrust * 10.0f, &f);
+        pp_vec3_scale(&f, thrust * 5.0f, &f);
         pp_body_add_force(PP_BODY(cars_[0].roll_body), f.xyz[0], f.xyz[1], f.xyz[2]);
 
         if (input->axis_was_pressed("Fire1") && grounded) {
