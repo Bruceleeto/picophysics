@@ -181,21 +181,22 @@ typedef struct _PPBody {
     PPObjectType type;
 
     PPVec3 pos;
-    float bounce;
     PPQuaternion rot;
-
     PPVec3 vel;
     PPVec3 acc;
-    float damping;
-
     PPVec3 a_vel;
     PPVec3 a_acc;
+
+    float bounce;
+    float friction;
+    float damping;
     float a_damping;
 
     float mass;
-    float friction;
-    PPMat3 inertia;
     float inv_mass;
+
+    PPMat3 inertia;
+    PPMat3 inv_inertia;
 
     BodyKind kind;
 
@@ -444,6 +445,53 @@ bool pp_vec3_normalize(PPVec3 *v) {
         pp_vec3_init(v);
         return false;
     }
+}
+
+void pp_mat3_inverse(const PPMat3* in, PPMat3* out) {
+    const float* m = in->m;
+
+    float a = m[0], d = m[3], g = m[6];
+    float b = m[1], e = m[4], h = m[7];
+    float c = m[2], f = m[5], i = m[8];
+
+    // Cofactors
+    float A =  (e * i - f * h);
+    float B = -(d * i - f * g);
+    float C =  (d * h - e * g);
+    float D = -(b * i - c * h);
+    float E =  (a * i - c * g);
+    float F = -(a * h - b * g);
+    float G =  (b * f - c * e);
+    float H = -(a * f - c * d);
+    float I =  (a * e - b * d);
+
+    // Determinant
+    float det = a * A + d * D + g * G;
+
+    float inv_det = 1.0f / det;
+
+    // Adjugate (still column-major)
+    out->m[0] = A * inv_det;
+    out->m[1] = D * inv_det;
+    out->m[2] = G * inv_det;
+
+    out->m[3] = B * inv_det;
+    out->m[4] = E * inv_det;
+    out->m[5] = H * inv_det;
+
+    out->m[6] = C * inv_det;
+    out->m[7] = F * inv_det;
+    out->m[8] = I * inv_det;
+}
+
+void pp_mat3_mult(const PPMat3* m, const PPVec3* p, PPVec3* pout) {
+    float x = p->x;
+    float y = p->y;
+    float z = p->z;
+
+    pout->x = m->m[0] * x + m->m[3] * y + m->m[6] * z;
+    pout->y = m->m[1] * x + m->m[4] * y + m->m[7] * z;
+    pout->z = m->m[2] * x + m->m[5] * y + m->m[8] * z;
 }
 
 PPQuaternion* pp_quat_init(PPQuaternion* q) {
@@ -1070,6 +1118,9 @@ PPSphere* pp_sphere_init(PPSphere* s, float radius, const PPVec3* pos, float mas
     s->radius = radius;
     s->body.type = PP_OBJECT_TYPE_SPHERE;
     s->body.inertia.m[0] = (2.0f / 5.0f) * mass * radius * radius;
+    s->body.inertia.m[4] = s->body.inertia.m[0];
+    s->body.inertia.m[8] = s->body.inertia.m[0];
+    pp_mat3_inverse(&s->body.inertia, &s->body.inv_inertia);
     pp_body_init(&s->body, pos, mass, kind);
     return s;
 }
@@ -1087,6 +1138,7 @@ PPBox* pp_box_init(PPBox* s, float width, float height, float depth, const PPVec
     s->body.inertia.m[4] = oot * mass * (d2 + h2);
     s->body.inertia.m[8] = oot * mass * (d2 + w2);
 
+    pp_mat3_inverse(&s->body.inertia, &s->body.inv_inertia);
     pp_body_init(&s->body, pos, mass, kind);
 
     pp_vec3_set(&s->whd, width, height, depth);
@@ -1370,6 +1422,7 @@ static void pp_solve(const PPCollision* manifold) {
     float vel_along_normal = 0.0f;
     PPVec3 rel_vel = {.xyz={0.0f, 0.0f, 0.0f}};
 
+    PPVec3 lhs_pcp, rhs_pcp = {.xyz={0.0f, 0.0f, 0.0f}};
     if(rhs) {
         pp_vec3_scale(&manifold->n, overlap * 0.5f, &adjustment_lhs);
         pp_vec3_scale(&manifold->n, overlap * 0.5f, &adjustment_rhs);
@@ -1377,7 +1430,6 @@ static void pp_solve(const PPCollision* manifold) {
         pp_vec3_sub(&rhs->pos, &adjustment_rhs, &rhs->pos);
 
         // Position (CoM) to contact point (r_a/r_b)
-        PPVec3 lhs_pcp, rhs_pcp;
         pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_pcp);
         pp_vec3_sub(&manifold->p, &rhs->pos, &rhs_pcp);
 
@@ -1395,7 +1447,7 @@ static void pp_solve(const PPCollision* manifold) {
         pp_vec3_scale(&manifold->n, overlap, &adjustment_lhs);
         pp_vec3_add(&lhs->pos, &adjustment_lhs, &lhs->pos);
 
-        PPVec3 lhs_pcp, lhs_vel;
+        PPVec3 lhs_vel;
         pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_pcp);
 
         // Velocity at contact point
@@ -1417,18 +1469,32 @@ static void pp_solve(const PPCollision* manifold) {
         float f = fmin(lhs->friction, (rhs) ? rhs->friction : 10000.0f);
 
         float inv_mass_sum = lhs->inv_mass + ((rhs && rhs->inv_mass) ? rhs->inv_mass : 0.0f);
-        float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
-        PPVec3 impulse_n;
-        pp_vec3_scale(&manifold->n, j_n, &impulse_n);
+        float numerator = -(1.0f + r) * vel_along_normal;
+        float linear_term = pp_vec3_dot(&manifold->n, &manifold->n) * inv_mass_sum;
 
-        float jt = -pp_vec3_dot(&rel_vel, &tangent) / inv_mass_sum;
-        jt = fmax(-j_n * f, fmin(jt, j_n * f));   // clamp to μ·|j_n|
-        PPVec3 impulse_t;
-        pp_vec3_normalize(&tangent);      // ensure unit tangent
-        pp_vec3_scale(&tangent, jt, &impulse_t);
+        // rhs_pcp might be zero here, but that's fine as it'll cause
+        // zero contribution to the angular velocity
+        PPVec3 lhs_pcp_cross_n, rhs_pcp_cross_n;
+        pp_vec3_cross(&lhs_pcp, &manifold->n, &lhs_pcp_cross_n);
+        pp_mat3_mult(&lhs->inv_inertia, &lhs_pcp_cross_n, &lhs_pcp_cross_n);
+
+        if(rhs) {
+            pp_vec3_cross(&rhs_pcp, &manifold->n, &rhs_pcp_cross_n);
+            pp_mat3_mult(&rhs->inv_inertia, &rhs_pcp_cross_n, &rhs_pcp_cross_n);
+        }
+
+        PPVec3 lhs_angular_term, rhs_angular_term, combined_angular_term;
+        pp_vec3_cross(&lhs_pcp, &lhs_pcp_cross_n, &lhs_angular_term);
+        pp_vec3_cross(&rhs_pcp, &rhs_pcp_cross_n, &rhs_angular_term);
+        pp_vec3_add(&lhs_angular_term, &rhs_angular_term, &combined_angular_term);
+
+        float angular_term = pp_vec3_dot(&combined_angular_term, &manifold->n);
+
+        float denominator = linear_term + angular_term;
+        float J = numerator / denominator;
 
         PPVec3 impulse;
-        pp_vec3_add(&impulse_n, &impulse_t, &impulse);
+        pp_vec3_scale(&manifold->n, J, &impulse);
 
         PPVec3 dv_lhs, dv_rhs;
         pp_vec3_scale(&impulse, lhs->inv_mass, &dv_lhs);

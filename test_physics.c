@@ -198,5 +198,17 @@ int main(int argc, char* argv[]) {
     PPQuaternion yaw45 = {.xyzw={0.924f, 0.0f, 0.0f, 0.383f}};
     pp_body_set_rotation(PP_BODY(ray_box), yaw45.x, yaw45.y, yaw45.z, yaw45.w);
 
+    // Check mat3_inverse
+    PPMat3 I = { .m = {1,0,0, 0,1,0, 0,0,1} };
+    PPMat3 inv;
+    pp_mat3_inverse(&I, &inv);
+    CHECK(CLOSE(I.m[0], 1), "Unexpected value");
+    CHECK(CLOSE(I.m[1], 0), "Unexpected value");
+    CHECK(CLOSE(I.m[2], 0), "Unexpected value");
+
+    CHECK(CLOSE(I.m[3], 0), "Unexpected value");
+    CHECK(CLOSE(I.m[4], 1), "Unexpected value");
+    CHECK(CLOSE(I.m[5], 0), "Unexpected value");
+
     return 0;
 }
