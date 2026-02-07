@@ -1390,7 +1390,7 @@ static void pp_solve(const PPCollision* manifold) {
 
         // Relative velocity at contact point
         pp_vec3_sub(&rhs_vel, &lhs_vel, &rel_vel);   // v_rhs – v_lhs
-        vel_along_normal = pp_vec3_dot(&rel_vel, &manifold->n);
+
     } else {
         pp_vec3_scale(&manifold->n, overlap, &adjustment_lhs);
         pp_vec3_add(&lhs->pos, &adjustment_lhs, &lhs->pos);
@@ -1403,9 +1403,9 @@ static void pp_solve(const PPCollision* manifold) {
         pp_vec3_add(&lhs_vel, &lhs->vel, &lhs_vel);
 
         pp_vec3_assign(&rel_vel, &lhs_vel);
-
-        vel_along_normal = pp_vec3_dot(&lhs->vel, &manifold->n);
     }
+
+    vel_along_normal = pp_vec3_dot(&rel_vel, &manifold->n);
 
     if (vel_along_normal < 0) {
         PPVec3 penetration, tangent;
