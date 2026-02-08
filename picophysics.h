@@ -40,7 +40,7 @@
  *  - 32 bodies (spheres + boxes)
  *  - 128 triangles
  *
- * If you need more than that you can define PHYSICS_MAX_OBJECTS or PHYSICS_MAX_TRIANGLES
+ * If you need more than that you can define PICOPHYSICS_MAX_OBJECTS or PICOPHYSICS_MAX_TRIANGLES
  * before including physics.h.
  *
  * # Support
@@ -322,12 +322,12 @@ void pp_body_limit_angular_velocity(PPBody* body, float speed);
 
 #define EPA_DEBUG 0
 
-#ifndef PHYSICS_MAX_OBJECTS
-    #define PHYSICS_MAX_OBJECTS 32
+#ifndef PICOPHYSICS_MAX_OBJECTS
+    #define PICOPHYSICS_MAX_OBJECTS 32
 #endif
 
-#ifndef PHYSICS_MAX_TRIANGLES
-    #define PHYSICS_MAX_TRIANGLES 128
+#ifndef PICOPHYSICS_MAX_TRIANGLES
+    #define PICOPHYSICS_MAX_TRIANGLES 128
 #endif
 
 typedef union _PPObject {
@@ -335,11 +335,11 @@ typedef union _PPObject {
     struct _PPBox b;
 } PPObject;
 
-static PPObject objects[PHYSICS_MAX_OBJECTS];
+static PPObject objects[PICOPHYSICS_MAX_OBJECTS];
 static int object_count = 0;
 static int dead_object_count = 0;
 
-static PPTriangle tris[PHYSICS_MAX_TRIANGLES];
+static PPTriangle tris[PICOPHYSICS_MAX_TRIANGLES];
 static int tri_count = 0;
 
 static struct _PPCollisionMapEntry {
