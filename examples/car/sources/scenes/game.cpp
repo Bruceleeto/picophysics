@@ -179,6 +179,7 @@ void GameScene::on_load() {
     PPVec3 pos;
     pp_vec3_set(&pos, 0, 2, 0);
     ball_.body = pp_physics_create_sphere(0.5f, &pos, 0.01f, BALL_KIND);
+    pp_body_set_friction(PP_BODY(ball_.body), 0.9f);
 
     pp_vec3_set(&pos, 1.0f, 4, 0);
     cars_[0].body = pp_physics_create_box(0.5f, 0.5f, 1.0f, &pos, 1.0, CAR_BODY_KIND);

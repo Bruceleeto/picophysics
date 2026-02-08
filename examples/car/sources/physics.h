@@ -157,6 +157,14 @@ typedef struct _PPCollision {
     PPBody* obj1;
     PPBody* obj2;
 
+    // These are stored separately as obj1/obj2 will
+    // be null if we collided with geometry, but these
+    // values are still necessary in the null case
+    float obj1_bounce;
+    float obj2_bounce;
+    float obj1_friction;
+    float obj2_friction;
+
     PPObjectType type1;
     PPObjectType type2;
 
@@ -1186,6 +1194,15 @@ void pp_body_get_rotation(PPBody* s, PPQuaternion* rot) {
     pp_quat_assign(rot, &s->rot);
 }
 
+bool pp_body_set_friction(PPBody* s, float f) {
+    if(!s || f < 0.0f || f > 1.0f) {
+        return false;
+    }
+
+    s->friction = f;
+    return true;
+}
+
 bool pp_body_set_bounce(PPBody* s, float b) {
     if(!s || b < 0.0f || b > 1.0f) {
         return false;
@@ -1257,6 +1274,10 @@ void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, co
     pp_vec3_assign(&c->n, n);
     c->obj1 = PP_BODY(lhs);
     c->obj2 = PP_BODY(rhs);
+    c->obj1_bounce = c->obj1->bounce;
+    c->obj2_bounce = c->obj2->bounce;
+    c->obj1_friction = c->obj1->friction;
+    c->obj2_friction = c->obj2->friction;
     c->type1 = PP_OBJECT_TYPE_SPHERE;
     c->type2 = PP_OBJECT_TYPE_BOX;
     c->kind1 = lhs->body.kind;
@@ -1282,6 +1303,10 @@ void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* r
 
     c->obj1 = PP_BODY(lhs);
     c->obj2 = PP_BODY(rhs);
+    c->obj1_bounce = c->obj1->bounce;
+    c->obj2_bounce = c->obj2->bounce;
+    c->obj1_friction = c->obj1->friction;
+    c->obj2_friction = c->obj2->friction;
     c->type1 = PP_OBJECT_TYPE_SPHERE;
     c->type2 = PP_OBJECT_TYPE_SPHERE;
     c->kind1 = lhs->body.kind;
@@ -1294,6 +1319,10 @@ void pp_fill_collision_info_sphere_triangle(const PPSphere* lhs, const PPTriangl
     c->dist = dist;
     c->obj1 = PP_BODY(lhs);
     c->obj2 = NULL;
+    c->obj1_bounce = c->obj1->bounce;
+    c->obj2_bounce = 0.0f; // FIXME
+    c->obj1_friction = c->obj1->friction;
+    c->obj2_friction = tri->friction;
     c->type1 = PP_OBJECT_TYPE_SPHERE;
     c->type2 = PP_OBJECT_TYPE_TRIANGLE;
     c->kind1 = lhs->body.kind;
@@ -1362,7 +1391,7 @@ PPTriangle* pp_physics_create_triangle(const PPVec3* v1, const PPVec3* v2, const
     pp_vec3_cross(&e1, &e2, &tri->n);
     pp_vec3_normalize(&tri->n);
 
-    tri->friction = 0.1f;
+    tri->friction = 0.5f;
     tri->kind = kind;
 
     return tri;
@@ -1465,8 +1494,8 @@ static void pp_solve(const PPCollision* manifold, float step) {
         pp_vec3_sub(&rel_vel, &penetration, &tangent);
 
         // Moving towards each other
-        float r = fmax(lhs->bounce, (rhs) ? rhs->bounce : 0.0f);
-        float f = fmin(lhs->friction, (rhs) ? rhs->friction : 10000.0f);
+        float r = fmax(manifold->obj1_bounce, manifold->obj2_bounce);
+        float f = manifold->obj1_friction * manifold->obj2_friction;
 
         float inv_mass_sum = lhs->inv_mass + ((rhs && rhs->inv_mass) ? rhs->inv_mass : 0.0f);
         float numerator = -(1.0f + r) * vel_along_normal;
@@ -1512,9 +1541,8 @@ static void pp_solve(const PPCollision* manifold, float step) {
         }
 
         // Friction!!!
-        float rhs_friction = (rhs ? rhs->friction : 0.9f);
         float e = r;  //Restitution
-        float u = lhs->friction * rhs_friction; // Friction coefficient
+        float u = f; // Friction coefficient
         float lhs_im = lhs->inv_mass;
         float rhs_im = (rhs ? rhs->inv_mass : 0.0f);
         PPVec3 lhs_fv, rhs_fv = {0.0f, 0.0f, 0.0f};
