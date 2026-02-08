@@ -1411,7 +1411,7 @@ void pp_physics_set_gravity(const PPVec3* v) {
 }
 
 
-static void pp_solve(const PPCollision* manifold) {
+static void pp_solve(const PPCollision* manifold, float step) {
     PPBody* lhs = PP_BODY(manifold->obj1);
     PPBody* rhs = PP_BODY(manifold->obj2);
 
@@ -1503,6 +1503,119 @@ static void pp_solve(const PPCollision* manifold) {
         if(rhs) {
             pp_vec3_scale(&impulse, rhs->inv_mass, &dv_rhs);
             pp_vec3_sub(&rhs->vel, &dv_rhs, &rhs->vel);   // v_rhs ← v_rhs + Δv
+        }
+
+        const float friction_impulse_threshold = 0.01f * (1.0f / step);
+        if (fabsf(J) >= friction_impulse_threshold) {
+            // No need for friction calculation
+            return;
+        }
+
+        // Friction!!!
+        float rhs_friction = (rhs ? rhs->friction : 0.9f);
+        float e = r;  //Restitution
+        float u = lhs->friction * rhs_friction; // Friction coefficient
+        float lhs_im = lhs->inv_mass;
+        float rhs_im = (rhs ? rhs->inv_mass : 0.0f);
+        PPVec3 lhs_fv, rhs_fv = {0.0f, 0.0f, 0.0f};
+        PPVec3 lhs_fr, rhs_fr = {0.0f, 0.0f, 0.0f};
+
+        // Calc vectors from position to contact point. FIXME: reuse above
+        pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_fr);
+        if(rhs) {
+            pp_vec3_sub(&manifold->p, &rhs->pos, &rhs_fr);
+        }
+        // Calculate velocities at the contact point
+        pp_vec3_cross(&lhs->a_vel, &lhs_fr, &lhs_fv);
+        pp_vec3_add(&lhs_fv, &lhs->vel, &lhs_fv);
+        if(rhs) {
+            pp_vec3_cross(&rhs->a_vel, &rhs_fr, &rhs_fv);
+            pp_vec3_add(&rhs_fv, &rhs->vel, &rhs_fv);
+        }
+        // Get the relative velocity at the contact point
+        // between the two objects
+        PPVec3 fvr;
+        pp_vec3_sub(&rhs_fv, &lhs_fv, &fvr);
+
+        // Remove normal component to get tangent velocity
+        float rv_dot_n = pp_vec3_dot(&fvr, &manifold->n);
+
+        PPVec3 normal_component;
+        pp_vec3_scale(&manifold->n, rv_dot_n, &normal_component);
+
+        PPVec3 ftangent;
+        pp_vec3_sub(&fvr, &normal_component, &ftangent);
+
+        float ftangent_len = pp_vec3_length(&ftangent);
+        if (ftangent_len < 1e-6f)
+            return; // No tangential motion → no friction
+
+        pp_vec3_scale(&ftangent, 1.0f / ftangent_len, &ftangent); // Normalize
+
+        // --- Effective mass computation (matrix inertia version) ---
+
+        PPVec3 lhs_rt, rhs_rt;
+        pp_vec3_cross(&lhs_fr, &ftangent, &lhs_rt);
+        pp_vec3_cross(&rhs_fr, &ftangent, &rhs_rt);
+
+        PPVec3 lhs_i_rt, rhs_i_rt;
+        pp_mat3_mult(&lhs->inv_inertia, &lhs_rt, &lhs_i_rt);
+        if(rhs) {
+            pp_mat3_mult(&rhs->inv_inertia, &rhs_rt, &rhs_i_rt);
+        }
+
+        PPVec3 lhs_fangular_term, rhs_fangular_term;
+        pp_vec3_cross(&lhs_i_rt, &lhs_fr, &lhs_fangular_term);
+        pp_vec3_cross(&rhs_i_rt, &rhs_fr, &rhs_fangular_term);
+
+        float finv_mass_sum =
+            lhs_im +
+            rhs_im +
+            pp_vec3_dot(&lhs_fangular_term, &ftangent) +
+            pp_vec3_dot(&rhs_fangular_term, &ftangent);
+
+        if (finv_mass_sum <= 1e-6f)
+            return;
+
+        // Friction impulse scalar
+        float jt = -pp_vec3_dot(&fvr, &ftangent);
+        jt /= finv_mass_sum;
+
+        // Coulomb friction clamp
+        float jn = J;
+        float max_friction = u * jn;
+
+        if (jt >  max_friction) jt =  max_friction;
+        if (jt < -max_friction) jt = -max_friction;
+
+        PPVec3 friction_impulse;
+        pp_vec3_scale(&ftangent, jt, &friction_impulse);
+
+        // --- Apply linear impulse ---
+
+        PPVec3 temp;
+
+        pp_vec3_scale(&friction_impulse, lhs_im, &temp);
+        pp_vec3_sub(&lhs->vel, &temp, &lhs->vel);
+
+        if(rhs) {
+            pp_vec3_scale(&friction_impulse, rhs_im, &temp);
+            pp_vec3_add(&rhs->vel, &temp, &rhs->vel);
+        }
+        // --- Apply angular impulse (matrix inertia) ---
+
+        PPVec3 ang_imp;
+
+        // lhs
+        pp_vec3_cross(&lhs_fr, &friction_impulse, &ang_imp);
+        pp_mat3_mult(&lhs->inv_inertia, &ang_imp, &ang_imp);
+        pp_vec3_sub(&lhs->a_vel, &ang_imp, &lhs->a_vel);
+
+        if(rhs) {
+            // rhs
+            pp_vec3_cross(&rhs_fr, &friction_impulse, &ang_imp);
+            pp_mat3_mult(&rhs->inv_inertia, &ang_imp, &ang_imp);
+            pp_vec3_add(&rhs->a_vel, &ang_imp, &rhs->a_vel);
         }
     }
 }
@@ -2336,7 +2449,7 @@ void pp_physics_step(float t) {
 
                     if (respond) {
                         // pp_sphere_sphere_response(lhs_sphere, rhs_sphere, &c);
-                        pp_solve(&c);
+                        pp_solve(&c, t);
                     }
                 }
             } else if((lhs_sphere && rhs_box) || (rhs_sphere && lhs_box)) {
@@ -2358,7 +2471,7 @@ void pp_physics_step(float t) {
 
                     if (respond) {
                         // pp_sphere_box_response(sphere, box, &c, t);
-                        pp_solve(&c);
+                        pp_solve(&c, t);
                     }
                 }
             }
@@ -2384,7 +2497,7 @@ void pp_physics_step(float t) {
                         }
 
                         if(respond) {
-                            pp_solve(&c);
+                            pp_solve(&c, t);
                         }
                     }
                 }
