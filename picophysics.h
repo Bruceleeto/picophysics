@@ -56,14 +56,13 @@
  *
  * I am *not* a mathematician! Collision response is something I'm finding quite
  * difficult to understand (particularly angular/torque responses). There are definitely
- * issues in the collision response code. I would like objects to roll correctly, and for
- * friction to impact angular velocity (currently only angular damping is respected) if you
- * can help fix it, I'd appreciate it!
+ * issues in the collision response code. If you can help fix it, I'd appreciate it!
  *
  * # Roadmap
  *
- * - Add proper angular collision response
  * - Proper manifold generation for GJK/EPA
+ * - Potentially switch to SAT as GJK is only being used for box/box collisions and SAT seems more suitable for one-shot manifold generation
+ * - Add box/triangle collisions
  * - Allow objects to be marked as static
  * - Broad-phase collision detection (spatial hashing)
  * - Add fixed and spring joints (links) between objects
