@@ -66,7 +66,6 @@
  * - Allow objects to be marked as static
  * - Broad-phase collision detection (spatial hashing)
  * - Add fixed and spring joints (links) between objects
- * - Simplify/share collision response logic across all things
  * - Optimisations (replacing divisions where possible)
  * - Slab allocation (so it's possible to overflow the static array)
  * - Make structs opaque
