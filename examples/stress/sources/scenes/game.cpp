@@ -16,8 +16,11 @@
 
 void define_stadium()
 {
-    // Create a box at the default position with no mass
-    pp_physics_create_box(100f, 1.0f, 100.0f, NULL, 0.0f, ENV_FLOOR_KIND);
+    float height = -2.0f;
+    PPVec3 p0 = {-100.0f, height, -100.0f};
+    PPVec3 p1 = {0.0f, height, 100.0f};
+    PPVec3 p2 = {100.0f, height, -100.0f};
+    pp_physics_create_triangle(&p0, &p1, &p2, ENV_FLOOR_KIND);
 }
 
 bool visualise(const void *, const void *, BodyKind, BodyKind, const PPCollision *c, const void *self)
@@ -33,6 +36,8 @@ bool visualise(const void *, const void *, BodyKind, BodyKind, const PPCollision
 
 void GameScene::on_load() {
     pp_physics_collision_map_add(BOX_KIND, BALL_KIND, (void *) this, &visualise);
+    PPVec3 grv = {0.0f, -9.8f, 0.0f};
+    pp_physics_set_gravity(&grv);
 
     auto axis = input->new_axis("Tab");
     axis->set_positive_keyboard_key(smlt::KEYBOARD_CODE_TAB);
@@ -40,6 +45,7 @@ void GameScene::on_load() {
     camera_ = create_child<smlt::Camera3D>();
     camera_->set_perspective_projection(smlt::Degrees(60.0f), window->aspect_ratio());
     camera_->transform->set_position(smlt::Vec3(0, 0, -10));
+    camera_->transform->look_at(smlt::Vec3());
 
     auto tex = assets->load_texture("assets/sand.png");
     auto floor_mat = assets->load_material(smlt::Material::BuiltIns::TEXTURE_ONLY);
@@ -49,33 +55,22 @@ void GameScene::on_load() {
 
     define_stadium();
 
-    auto mesh = assets->load_mesh("assets/ball/mesh.obj");
+    auto mesh = assets->load_mesh("assets/ball/mesh.obj",
+                                  smlt::VertexSpecification::DEFAULT,
+                                  smlt::MeshLoadOptions(),
+                                  smlt::GARBAGE_COLLECT_NEVER);
+    mesh->set_name("Sphere");
+
     auto s = 1.0f / mesh->aabb().max_dimension();
     mesh->transform_vertices(smlt::Mat4::as_scale(smlt::Vec3(s, s, s)));
-    ball_.actor = create_child<smlt::Actor>(mesh);
 
-    auto box_mesh = assets->load_mesh("assets/box/cube.obj");
-    box_.actor = create_child<smlt::Actor>(box_mesh);
+    auto box_mesh = assets->load_mesh("assets/box/cube.obj",
+                                      smlt::VertexSpecification::DEFAULT,
+                                      smlt::MeshLoadOptions(),
+                                      smlt::GARBAGE_COLLECT_NEVER);
+    box_mesh->set_name("Box");
     s = 1.0f / box_mesh->aabb().max_dimension();
     box_mesh->transform_vertices(smlt::Mat4::as_scale(smlt::Vec3(s, s, s)));
-
-    PPVec3 pos;
-    pp_vec3_set(&pos, 5.0f, 4, 0);
-    ball_.body = pp_physics_create_sphere(mesh->aabb().max_dimension() * 0.5f,
-                                          &pos,
-                                          0.01f,
-                                          BALL_KIND);
-
-    pp_vec3_set(&pos, -5.0f, 4, 0);
-    box_.body = pp_physics_create_box(mesh->aabb().width(),
-                                      mesh->aabb().height(),
-                                      mesh->aabb().depth(),
-                                      &pos,
-                                      1.0,
-                                      BOX_KIND);
-
-
-    floor_ = create_child<smlt::Actor>(floor_mesh);
 
     auto layer = compositor->create_layer(this, camera_);
     layer->viewport->set_color(smlt::Color::gray());
@@ -84,6 +79,12 @@ void GameScene::on_load() {
     debug_ = create_child<smlt::Debug>();
     debug_->set_line_width(0.05f);
     debug_->set_point_size(0.25f);
+
+    auto sphere_axis = input->new_axis("Sphere");
+    sphere_axis->set_positive_keyboard_key(smlt::KEYBOARD_CODE_S);
+
+    auto box_axis = input->new_axis("Box");
+    box_axis->set_positive_keyboard_key(smlt::KEYBOARD_CODE_B);
 }
 
 void GameScene::on_fixed_update(float step)
@@ -92,21 +93,33 @@ void GameScene::on_fixed_update(float step)
 }
 
 void GameScene::on_update(float dt) {
-    auto &rgen = smlt::RandomGenerator::instance();
-    static float time_to_next_shape = 0.0f;
-    time_to_next_shape -= dt;
-    if (time_to_next_shape_ <= 0.0f) {
+    if (input->axis_was_pressed("Sphere")) {
+        Shape *s = &shapes_[shape_count_++];
+        s->body = PP_BODY(pp_physics_create_sphere(0.5f, NULL, 1.0f, BALL_KIND));
+
+        auto m = assets->find_mesh("Sphere");
+        assert(m);
+        s->actor = create_child<smlt::Actor>(m);
+    }
+
+    if (input->axis_was_pressed("Box")) {
+        Shape *s = &shapes_[shape_count_++];
+        s->body = PP_BODY(pp_physics_create_box(1.0f, 1.0f, 1.0f, NULL, 1.0f, BOX_KIND));
+
+        auto m = assets->find_mesh("Box");
+        assert(m);
+        s->actor = create_child<smlt::Actor>(m);
+    }
+
+    for (int i = 0; i < shape_count_; ++i) {
+        Shape *s = &shapes_[i];
         PPVec3 pos;
-        pp_vec3_set(&pos, rgen.float_in_range(-8.0f, 8.0f), 10.0f, rgen.float_in_range(-8.0f, 8.0f));
+        PPQuaternion rot;
+        pp_body_get_position(s->body, &pos);
+        pp_body_get_rotation(s->body, &rot);
 
-        int which = rgen.int_in_range(0, 1);
-        if (which == 0) {
-            pp_physics_create_sphere(0.5f, &pos, 1.0f, BALL_KIND);
-        } else {
-            pp_physics_create_box(1.0f, 1.0f, 1.0f, &pos, 1.0f, BOX_KIND);
-        }
-
-        time_to_next_shape_ = 1.0f;
+        s->actor->transform->set_position(smlt::Vec3(pos.x, pos.y, pos.z));
+        s->actor->transform->set_orientation(smlt::Quaternion(rot.x, rot.y, rot.z, rot.w));
     }
 }
 
