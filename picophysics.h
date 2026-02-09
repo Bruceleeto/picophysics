@@ -1108,7 +1108,13 @@ static void pp_body_init(PPBody* body, const PPVec3* pos, float mass, BodyKind k
     pp_vec3_init(&body->a_vel);
     pp_vec3_init(&body->a_acc);
     pp_quat_init(&body->rot);
-    pp_vec3_set(&body->pos, pos->x, pos->y, pos->z);
+
+    if(pos) {
+        pp_vec3_set(&body->pos, pos->x, pos->y, pos->z);
+    } else {
+        pp_vec3_set(&body->pos, 0.0f, 0.0f, 0.0f);
+    }
+
     body->kind = kind;
     body->mass = mass;
     body->inv_mass = 1.0f / mass;
