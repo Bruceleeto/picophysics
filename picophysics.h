@@ -337,6 +337,10 @@ void pp_body_limit_angular_velocity(PPBody* body, float speed);
     #define PICOPHYSICS_MAX_TRIANGLES 128
 #endif
 
+#ifndef PICOPHYSICS_MAX_MANIFOLDS
+    #define PICOPHYSICS_MAX_MANIFOLDS 256
+#endif
+
 typedef union _PPObject {
     struct _PPSphere s;
     struct _PPBox b;
@@ -2376,7 +2380,6 @@ bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* cont
 
 void pp_physics_step(float t) {
     PPVec3 scaled_vel;
-
     // Apply acceleration to velocity
     for(int i = 0; i < object_count; ++i) {
         PPBody* body = (PPBody*) &objects[i];
@@ -2451,9 +2454,11 @@ void pp_physics_step(float t) {
         pp_quat_normalize(&body->rot); // Normalize the quaternion
     }
 
+    int manifold_count = 0;
+    PPCollision manifolds[PICOPHYSICS_MAX_MANIFOLDS];
 
     for(int i = 0; i < object_count; ++i) {
-        // Check collision between spheres
+        // Check collision between bodies
         PPBody* lhs_body = (PPBody*) &objects[i];
         PPSphere* lhs_sphere = PP_SPHERE(lhs_body);
         PPBox* lhs_box = PP_BOX(lhs_body);
@@ -2487,7 +2492,7 @@ void pp_physics_step(float t) {
                         }
 
                         if(respond) {
-                            pp_solve(&c, t);
+                            manifolds[manifold_count++] = c;
                         }
                     }
                 }
@@ -2521,8 +2526,7 @@ void pp_physics_step(float t) {
                     }
 
                     if (respond) {
-                        // pp_sphere_sphere_response(lhs_sphere, rhs_sphere, &c);
-                        pp_solve(&c, t);
+                        manifolds[manifold_count++] = c;
                     }
                 }
             } else if((lhs_sphere && rhs_box) || (rhs_sphere && lhs_box)) {
@@ -2543,12 +2547,15 @@ void pp_physics_step(float t) {
                     }
 
                     if (respond) {
-                        // pp_sphere_box_response(sphere, box, &c, t);
-                        pp_solve(&c, t);
+                        manifolds[manifold_count++] = c;
                     }
                 }
             }
         }
+    }
+
+    for(int i = 0; i < manifold_count; ++i) {
+        pp_solve(&manifolds[i], t);
     }
 }
 
