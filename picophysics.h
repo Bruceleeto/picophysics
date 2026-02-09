@@ -1516,7 +1516,18 @@ static void pp_solve(const PPCollision* manifold, float step) {
 
         float f = manifold->obj1_friction * manifold->obj2_friction;
 
-        float numerator = -(1.0f + r) * vel_along_normal;
+        // Baumgarte positional bias (Stabilisation)
+        float slop = 0.01f;
+        float beta = 0.2f;
+
+        float pen = manifold->dist - slop;
+        if(pen < 0.0f) {
+            pen = 0.0f;
+        }
+
+        float bias = beta * pen / step;
+
+        float numerator = -(1.0f + r) * vel_along_normal - bias;
         float linear_term = pp_vec3_dot(&manifold->n, &manifold->n) * inv_mass_sum;
 
         // rhs_pcp might be zero here, but that's fine as it'll cause
