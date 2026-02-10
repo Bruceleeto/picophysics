@@ -337,6 +337,10 @@ void pp_body_limit_angular_velocity(PPBody* body, float speed);
     #define PICOPHYSICS_MAX_TRIANGLES 128
 #endif
 
+#ifndef PICOPHYSICS_MAX_MANIFOLDS
+    #define PICOPHYSICS_MAX_MANIFOLDS 256
+#endif
+
 typedef union _PPObject {
     struct _PPSphere s;
     struct _PPBox b;
@@ -1289,7 +1293,7 @@ void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, co
 }
 
 void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* rhs, float dist, PPCollision* c) {
-    pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &c->n);
+    pp_vec3_sub(&rhs->body.pos, &lhs->body.pos, &c->n);
     c->dist = dist;
     if(dist > 0) {
         c->n.xyz[0] /= dist;
@@ -1457,14 +1461,17 @@ static void pp_solve(const PPCollision* manifold, float step) {
 
     PPVec3 lhs_pcp, rhs_pcp = {.xyz={0.0f, 0.0f, 0.0f}};
     float inv_mass_sum = lhs->inv_mass + ((rhs && rhs->inv_mass) ? rhs->inv_mass : 0.0f);
+
+    // If this is collision between a dynamic body and a static triangle then
+    // rhs will be null
     if(rhs) {
         float lhs_ratio = lhs->inv_mass / inv_mass_sum;
         float rhs_ratio = rhs->inv_mass / inv_mass_sum;
 
         pp_vec3_scale(&manifold->n, overlap * lhs_ratio, &adjustment_lhs);
         pp_vec3_scale(&manifold->n, overlap * rhs_ratio, &adjustment_rhs);
-        pp_vec3_add(&lhs->pos, &adjustment_lhs, &lhs->pos);
-        pp_vec3_sub(&rhs->pos, &adjustment_rhs, &rhs->pos);
+        pp_vec3_sub(&lhs->pos, &adjustment_lhs, &lhs->pos);
+        pp_vec3_add(&rhs->pos, &adjustment_rhs, &rhs->pos);
 
         // Position (CoM) to contact point (r_a/r_b)
         pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_pcp);
@@ -1512,7 +1519,18 @@ static void pp_solve(const PPCollision* manifold, float step) {
 
         float f = manifold->obj1_friction * manifold->obj2_friction;
 
-        float numerator = -(1.0f + r) * vel_along_normal;
+        // Baumgarte positional bias (Stabilisation)
+        float slop = 0.01f;
+        float beta = 0.2f;
+
+        float pen = manifold->dist - slop;
+        if(pen < 0.0f) {
+            pen = 0.0f;
+        }
+
+        float bias = beta * pen / step;
+
+        float numerator = -(1.0f + r) * vel_along_normal - bias;
         float linear_term = pp_vec3_dot(&manifold->n, &manifold->n) * inv_mass_sum;
 
         // rhs_pcp might be zero here, but that's fine as it'll cause
@@ -2376,7 +2394,6 @@ bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* cont
 
 void pp_physics_step(float t) {
     PPVec3 scaled_vel;
-
     // Apply acceleration to velocity
     for(int i = 0; i < object_count; ++i) {
         PPBody* body = (PPBody*) &objects[i];
@@ -2451,9 +2468,11 @@ void pp_physics_step(float t) {
         pp_quat_normalize(&body->rot); // Normalize the quaternion
     }
 
+    int manifold_count = 0;
+    PPCollision manifolds[PICOPHYSICS_MAX_MANIFOLDS];
 
     for(int i = 0; i < object_count; ++i) {
-        // Check collision between spheres
+        // Check collision between bodies
         PPBody* lhs_body = (PPBody*) &objects[i];
         PPSphere* lhs_sphere = PP_SPHERE(lhs_body);
         PPBox* lhs_box = PP_BOX(lhs_body);
@@ -2487,7 +2506,7 @@ void pp_physics_step(float t) {
                         }
 
                         if(respond) {
-                            pp_solve(&c, t);
+                            manifolds[manifold_count++] = c;
                         }
                     }
                 }
@@ -2521,8 +2540,7 @@ void pp_physics_step(float t) {
                     }
 
                     if (respond) {
-                        // pp_sphere_sphere_response(lhs_sphere, rhs_sphere, &c);
-                        pp_solve(&c, t);
+                        manifolds[manifold_count++] = c;
                     }
                 }
             } else if((lhs_sphere && rhs_box) || (rhs_sphere && lhs_box)) {
@@ -2543,12 +2561,15 @@ void pp_physics_step(float t) {
                     }
 
                     if (respond) {
-                        // pp_sphere_box_response(sphere, box, &c, t);
-                        pp_solve(&c, t);
+                        manifolds[manifold_count++] = c;
                     }
                 }
             }
         }
+    }
+
+    for(int i = 0; i < manifold_count; ++i) {
+        pp_solve(&manifolds[i], t);
     }
 }
 

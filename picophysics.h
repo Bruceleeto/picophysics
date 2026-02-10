@@ -1293,7 +1293,7 @@ void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, co
 }
 
 void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* rhs, float dist, PPCollision* c) {
-    pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &c->n);
+    pp_vec3_sub(&rhs->body.pos, &lhs->body.pos, &c->n);
     c->dist = dist;
     if(dist > 0) {
         c->n.xyz[0] /= dist;
@@ -1461,14 +1461,17 @@ static void pp_solve(const PPCollision* manifold, float step) {
 
     PPVec3 lhs_pcp, rhs_pcp = {.xyz={0.0f, 0.0f, 0.0f}};
     float inv_mass_sum = lhs->inv_mass + ((rhs && rhs->inv_mass) ? rhs->inv_mass : 0.0f);
+
+    // If this is collision between a dynamic body and a static triangle then
+    // rhs will be null
     if(rhs) {
         float lhs_ratio = lhs->inv_mass / inv_mass_sum;
         float rhs_ratio = rhs->inv_mass / inv_mass_sum;
 
         pp_vec3_scale(&manifold->n, overlap * lhs_ratio, &adjustment_lhs);
         pp_vec3_scale(&manifold->n, overlap * rhs_ratio, &adjustment_rhs);
-        pp_vec3_add(&lhs->pos, &adjustment_lhs, &lhs->pos);
-        pp_vec3_sub(&rhs->pos, &adjustment_rhs, &rhs->pos);
+        pp_vec3_sub(&lhs->pos, &adjustment_lhs, &lhs->pos);
+        pp_vec3_add(&rhs->pos, &adjustment_rhs, &rhs->pos);
 
         // Position (CoM) to contact point (r_a/r_b)
         pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_pcp);

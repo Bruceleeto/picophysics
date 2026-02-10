@@ -1293,7 +1293,7 @@ void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, co
 }
 
 void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* rhs, float dist, PPCollision* c) {
-    pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &c->n);
+    pp_vec3_sub(&rhs->body.pos, &lhs->body.pos, &c->n);
     c->dist = dist;
     if(dist > 0) {
         c->n.xyz[0] /= dist;
@@ -1452,6 +1452,10 @@ static void pp_solve(const PPCollision* manifold, float step) {
     PPBody* lhs = PP_BODY(manifold->obj1);
     PPBody* rhs = PP_BODY(manifold->obj2);
 
+    PPVec3 lhs_pos = {.xyz = {lhs->pos.x, lhs->pos.y, lhs->pos.z}};
+    PPVec3 rhs_pos = {
+        .xyz = {rhs ? rhs->pos.x : 0.0f, rhs ? rhs->pos.y : 0.0f, rhs ? rhs->pos.z : 0.0f}};
+
     float overlap = manifold->dist;
 
     PPVec3 adjustment_lhs, adjustment_rhs;
@@ -1467,8 +1471,8 @@ static void pp_solve(const PPCollision* manifold, float step) {
 
         pp_vec3_scale(&manifold->n, overlap * lhs_ratio, &adjustment_lhs);
         pp_vec3_scale(&manifold->n, overlap * rhs_ratio, &adjustment_rhs);
-        pp_vec3_add(&lhs->pos, &adjustment_lhs, &lhs->pos);
-        pp_vec3_sub(&rhs->pos, &adjustment_rhs, &rhs->pos);
+        pp_vec3_sub(&lhs->pos, &adjustment_lhs, &lhs->pos);
+        pp_vec3_add(&rhs->pos, &adjustment_rhs, &rhs->pos);
 
         // Position (CoM) to contact point (r_a/r_b)
         pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_pcp);
@@ -1581,9 +1585,9 @@ static void pp_solve(const PPCollision* manifold, float step) {
         PPVec3 lhs_fr, rhs_fr = {0.0f, 0.0f, 0.0f};
 
         // Calc vectors from position to contact point. FIXME: reuse above
-        pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_fr);
+        pp_vec3_sub(&manifold->p, &lhs_pos, &lhs_fr);
         if(rhs) {
-            pp_vec3_sub(&manifold->p, &rhs->pos, &rhs_fr);
+            pp_vec3_sub(&manifold->p, &rhs_pos, &rhs_fr);
         }
         // Calculate velocities at the contact point
         pp_vec3_cross(&lhs->a_vel, &lhs_fr, &lhs_fv);
