@@ -1448,13 +1448,86 @@ void pp_physics_set_gravity(const PPVec3* v) {
 }
 
 
+static void pp_move_bodies(float t) {
+    PPVec3 scaled_vel;
+    // Apply acceleration to velocity
+    for(int i = 0; i < object_count; ++i) {
+        PPBody* body = (PPBody*) &objects[i];
+
+        if(!body->is_alive) {
+            continue;
+        }
+
+        // Apply gravity to acceleration before applying acceleration
+        // to velocity
+        pp_vec3_add(&body->acc, &gravity, &body->acc);
+
+        pp_vec3_scale(&body->acc, t, &scaled_vel);
+        pp_vec3_add(&body->vel, &scaled_vel, &body->vel);
+        pp_vec3_init(&body->acc);
+
+        // Apply linear damping
+        pp_vec3_scale(&body->vel, 1.0f - body->damping, &body->vel);
+
+        if(body->lock) {
+            if((body->lock & PP_AXIS_LOCK_PITCH) == PP_AXIS_LOCK_PITCH) {
+                body->a_acc.xyz[0] = 0.0f;
+                body->a_vel.xyz[0] = 0.0f;
+            }
+
+            if((body->lock & PP_AXIS_LOCK_YAW) == PP_AXIS_LOCK_YAW) {
+                body->a_acc.xyz[1] = 0.0f;
+                body->a_vel.xyz[1] = 0.0f;
+            }
+
+            if((body->lock & PP_AXIS_LOCK_ROLL) == PP_AXIS_LOCK_ROLL) {
+                body->a_acc.xyz[2] = 0.0f;
+                body->a_vel.xyz[2] = 0.0f;
+            }
+        }
+
+        PPVec3 scaled_ang_vel; // Temporary variable to store scaled angular velocity
+        pp_vec3_scale(&body->a_acc, t, &scaled_ang_vel);
+        pp_vec3_add(&body->a_vel, &scaled_ang_vel, &body->a_vel);
+
+        // Apply angular damping if desired
+        pp_vec3_scale(&body->a_vel, 1.0f - body->a_damping, &body->a_vel);
+
+        // Reset the acceleration
+        pp_vec3_init(&body->a_acc);
+
+        // Apply any limits
+        if(body->vel_limit != 0.0f && pp_vec3_length_sq(&body->vel) > body->vel_limit) {
+            pp_vec3_normalize(&body->vel);
+            pp_vec3_scale(&body->vel, body->vel_limit, &body->vel);
+        }
+
+        if(body->a_vel_limit != 0.0f && pp_vec3_length_sq(&body->a_vel) > body->a_vel_limit) {
+            pp_vec3_normalize(&body->a_vel);
+            pp_vec3_scale(&body->a_vel, body->a_vel_limit, &body->a_vel);
+        }
+    }
+
+    // Move all spheres by their velocity
+    for(int i = 0; i < object_count; ++i) {
+        PPBody* body = (PPBody*) &objects[i];
+        if(!body->is_alive) {
+            continue;
+        }
+
+        pp_vec3_scale(&body->vel, t, &scaled_vel);
+        pp_vec3_add(&body->pos, &scaled_vel, &body->pos);
+
+        PPQuaternion q_rot;
+        pp_quat_from_angular_velocity(&body->a_vel, t, &q_rot); // Get rotation quaternion from angular velocity
+        pp_quat_multiply(&body->rot, &q_rot, &body->rot); // Combine with current rotation
+        pp_quat_normalize(&body->rot); // Normalize the quaternion
+    }
+}
+
 static void pp_solve(const PPCollision* manifold, float step) {
     PPBody* lhs = PP_BODY(manifold->obj1);
     PPBody* rhs = PP_BODY(manifold->obj2);
-
-    PPVec3 lhs_pos = {.xyz = {lhs->pos.x, lhs->pos.y, lhs->pos.z}};
-    PPVec3 rhs_pos = {
-        .xyz = {rhs ? rhs->pos.x : 0.0f, rhs ? rhs->pos.y : 0.0f, rhs ? rhs->pos.z : 0.0f}};
 
     float overlap = manifold->dist;
 
@@ -1465,6 +1538,9 @@ static void pp_solve(const PPCollision* manifold, float step) {
 
     PPVec3 lhs_pcp, rhs_pcp = {.xyz={0.0f, 0.0f, 0.0f}};
     float inv_mass_sum = lhs->inv_mass + ((rhs && rhs->inv_mass) ? rhs->inv_mass : 0.0f);
+
+    // If this is collision between a dynamic body and a static triangle then
+    // rhs will be null
     if(rhs) {
         float lhs_ratio = lhs->inv_mass / inv_mass_sum;
         float rhs_ratio = rhs->inv_mass / inv_mass_sum;
@@ -1585,9 +1661,9 @@ static void pp_solve(const PPCollision* manifold, float step) {
         PPVec3 lhs_fr, rhs_fr = {0.0f, 0.0f, 0.0f};
 
         // Calc vectors from position to contact point. FIXME: reuse above
-        pp_vec3_sub(&manifold->p, &lhs_pos, &lhs_fr);
+        pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_fr);
         if(rhs) {
-            pp_vec3_sub(&manifold->p, &rhs_pos, &rhs_fr);
+            pp_vec3_sub(&manifold->p, &rhs->pos, &rhs_fr);
         }
         // Calculate velocities at the contact point
         pp_vec3_cross(&lhs->a_vel, &lhs_fr, &lhs_fv);
@@ -2394,80 +2470,7 @@ bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* cont
 }
 
 void pp_physics_step(float t) {
-    PPVec3 scaled_vel;
-    // Apply acceleration to velocity
-    for(int i = 0; i < object_count; ++i) {
-        PPBody* body = (PPBody*) &objects[i];
-
-        if(!body->is_alive) {
-            continue;
-        }
-
-        // Apply gravity to acceleration before applying acceleration
-        // to velocity
-        pp_vec3_add(&body->acc, &gravity, &body->acc);
-
-        pp_vec3_scale(&body->acc, t, &scaled_vel);
-        pp_vec3_add(&body->vel, &scaled_vel, &body->vel);
-        pp_vec3_init(&body->acc);
-
-        // Apply linear damping
-        pp_vec3_scale(&body->vel, 1.0f - body->damping, &body->vel);
-
-        if(body->lock) {
-            if((body->lock & PP_AXIS_LOCK_PITCH) == PP_AXIS_LOCK_PITCH) {
-                body->a_acc.xyz[0] = 0.0f;
-                body->a_vel.xyz[0] = 0.0f;
-            }
-
-            if((body->lock & PP_AXIS_LOCK_YAW) == PP_AXIS_LOCK_YAW) {
-                body->a_acc.xyz[1] = 0.0f;
-                body->a_vel.xyz[1] = 0.0f;
-            }
-
-            if((body->lock & PP_AXIS_LOCK_ROLL) == PP_AXIS_LOCK_ROLL) {
-                body->a_acc.xyz[2] = 0.0f;
-                body->a_vel.xyz[2] = 0.0f;
-            }
-        }
-
-        PPVec3 scaled_ang_vel; // Temporary variable to store scaled angular velocity
-        pp_vec3_scale(&body->a_acc, t, &scaled_ang_vel);
-        pp_vec3_add(&body->a_vel, &scaled_ang_vel, &body->a_vel);
-
-        // Apply angular damping if desired
-        pp_vec3_scale(&body->a_vel, 1.0f - body->a_damping, &body->a_vel);
-
-        // Reset the acceleration
-        pp_vec3_init(&body->a_acc);
-
-        // Apply any limits
-        if(body->vel_limit != 0.0f && pp_vec3_length_sq(&body->vel) > body->vel_limit) {
-            pp_vec3_normalize(&body->vel);
-            pp_vec3_scale(&body->vel, body->vel_limit, &body->vel);
-        }
-
-        if(body->a_vel_limit != 0.0f && pp_vec3_length_sq(&body->a_vel) > body->a_vel_limit) {
-            pp_vec3_normalize(&body->a_vel);
-            pp_vec3_scale(&body->a_vel, body->a_vel_limit, &body->a_vel);
-        }
-    }
-
-    // Move all spheres by their velocity
-    for(int i = 0; i < object_count; ++i) {
-        PPBody* body = (PPBody*) &objects[i];
-        if(!body->is_alive) {
-            continue;
-        }
-
-        pp_vec3_scale(&body->vel, t, &scaled_vel);
-        pp_vec3_add(&body->pos, &scaled_vel, &body->pos);
-
-        PPQuaternion q_rot;
-        pp_quat_from_angular_velocity(&body->a_vel, t, &q_rot); // Get rotation quaternion from angular velocity
-        pp_quat_multiply(&body->rot, &q_rot, &body->rot); // Combine with current rotation
-        pp_quat_normalize(&body->rot); // Normalize the quaternion
-    }
+    pp_move_bodies(t);
 
     int manifold_count = 0;
     PPCollision manifolds[PICOPHYSICS_MAX_MANIFOLDS];
