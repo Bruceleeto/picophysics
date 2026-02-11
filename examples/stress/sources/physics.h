@@ -255,7 +255,7 @@ void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQu
 PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source);
 float pp_quat_angle_between(const PPQuaternion* q0, const PPQuaternion* q1);
 
-void pp_physics_step(float t);
+void pp_physics_step(float t, int iterations);
 bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, BodyKind* ignore_kinds, const PPBody** body_hit, const PPTriangle** tri_hit, float* distance, PPVec3* intersection);
 void pp_physics_clear();
 void pp_physics_set_gravity(const PPVec3* v);
@@ -1548,8 +1548,8 @@ static void pp_solve(const PPCollision* manifold, float step) {
     float lhs_ratio = lhs->inv_mass / inv_mass_sum;
     float rhs_ratio = rhs->inv_mass / inv_mass_sum;
 
-    pp_vec3_scale(&manifold->n, overlap * lhs_ratio * 0.5f, &adjustment_lhs);
-    pp_vec3_scale(&manifold->n, overlap * rhs_ratio * 0.5f, &adjustment_rhs);
+    pp_vec3_scale(&manifold->n, overlap * lhs_ratio, &adjustment_lhs);
+    pp_vec3_scale(&manifold->n, overlap * rhs_ratio, &adjustment_rhs);
     pp_vec3_sub(&lhs->pos, &adjustment_lhs, &lhs->pos);
     pp_vec3_add(&rhs->pos, &adjustment_rhs, &rhs->pos);
 
@@ -1576,7 +1576,7 @@ static void pp_solve(const PPCollision* manifold, float step) {
 
     vel_along_normal = pp_vec3_dot(&rel_vel, &manifold->n);
 
-    if (fabsf(vel_along_normal) > 1e-3f) {
+    if (vel_along_normal < 0) {
         PPVec3 penetration, tangent;
         pp_vec3_scale(&manifold->n, vel_along_normal, &penetration);
         pp_vec3_sub(&rel_vel, &penetration, &tangent);
@@ -1628,23 +1628,25 @@ static void pp_solve(const PPCollision* manifold, float step) {
         pp_vec3_scale(&manifold->n, J, &impulse);
 
         PPVec3 dv_lhs, dv_rhs;
+        // lhs
         pp_vec3_scale(&impulse, lhs->inv_mass, &dv_lhs);
-        pp_vec3_add(&lhs->vel, &dv_lhs, &lhs->vel);   // v_lhs ← v_lhs + Δv
+        pp_vec3_sub(&lhs->vel, &dv_lhs, &lhs->vel); // v_lhs ← v_lhs + Δv
+
+        // rhs
+        pp_vec3_scale(&impulse, rhs->inv_mass, &dv_rhs);
+        pp_vec3_add(&rhs->vel, &dv_rhs, &rhs->vel);
 
         // lhs
         pp_vec3_cross(&lhs_pcp, &impulse, &ang_imp);
         pp_mat3_mult(&lhs->inv_inertia, &ang_imp, &ang_imp);
         pp_vec3_add(&lhs->a_vel, &ang_imp, &lhs->a_vel);
 
-        pp_vec3_scale(&impulse, rhs->inv_mass, &dv_rhs);
-        pp_vec3_sub(&rhs->vel, &dv_rhs, &rhs->vel);   // v_rhs ← v_rhs + Δv
-
+        // rhs
         pp_vec3_cross(&rhs_pcp, &impulse, &ang_imp);
         pp_mat3_mult(&rhs->inv_inertia, &ang_imp, &ang_imp);
         pp_vec3_sub(&rhs->a_vel, &ang_imp, &rhs->a_vel);
 
         // Friction!!!
-        float e = r;  //Restitution
         float u = f; // Friction coefficient
         float lhs_im = lhs->inv_mass;
         float rhs_im = rhs->inv_mass;
@@ -2449,7 +2451,8 @@ bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* cont
 
 }
 
-void pp_physics_step(float t) {
+void pp_physics_step(float t, int iterations)
+{
     pp_move_bodies(t);
 
     int manifold_count = 0;
@@ -2552,7 +2555,7 @@ void pp_physics_step(float t) {
         }
     }
 
-    for(int j = 0; j < 3; ++j) {
+    for (int j = 0; j < iterations; ++j) {
         for(int i = 0; i < manifold_count; ++i) {
             pp_solve(&manifolds[i], t);
         }

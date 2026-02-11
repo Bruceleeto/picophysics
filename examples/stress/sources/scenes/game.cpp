@@ -89,7 +89,7 @@ void GameScene::on_load() {
 
 void GameScene::on_fixed_update(float step)
 {
-    pp_physics_step(step);
+    pp_physics_step(step, 8);
 }
 
 void GameScene::on_update(float dt) {

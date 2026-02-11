@@ -40,7 +40,7 @@
  *  - 32 bodies (spheres + boxes)
  *  - 128 triangles
  *
- * If you need more than that you can define PHYSICS_MAX_OBJECTS or PHYSICS_MAX_TRIANGLES
+ * If you need more than that you can define PICOPHYSICS_MAX_OBJECTS or PICOPHYSICS_MAX_TRIANGLES
  * before including physics.h.
  *
  * # Support
@@ -56,18 +56,16 @@
  *
  * I am *not* a mathematician! Collision response is something I'm finding quite
  * difficult to understand (particularly angular/torque responses). There are definitely
- * issues in the collision response code. I would like objects to roll correctly, and for
- * friction to impact angular velocity (currently only angular damping is respected) if you
- * can help fix it, I'd appreciate it!
+ * issues in the collision response code. If you can help fix it, I'd appreciate it!
  *
  * # Roadmap
  *
- * - Add proper angular collision response
  * - Proper manifold generation for GJK/EPA
+ * - Potentially switch to SAT as GJK is only being used for box/box collisions and SAT seems more suitable for one-shot manifold generation
+ * - Add box/triangle collisions
  * - Allow objects to be marked as static
  * - Broad-phase collision detection (spatial hashing)
  * - Add fixed and spring joints (links) between objects
- * - Simplify/share collision response logic across all things
  * - Optimisations (replacing divisions where possible)
  * - Slab allocation (so it's possible to overflow the static array)
  * - Make structs opaque
@@ -157,6 +155,14 @@ typedef struct _PPCollision {
     PPBody* obj1;
     PPBody* obj2;
 
+    // These are stored separately as obj1/obj2 will
+    // be null if we collided with geometry, but these
+    // values are still necessary in the null case
+    float obj1_bounce;
+    float obj2_bounce;
+    float obj1_friction;
+    float obj2_friction;
+
     PPObjectType type1;
     PPObjectType type2;
 
@@ -181,21 +187,22 @@ typedef struct _PPBody {
     PPObjectType type;
 
     PPVec3 pos;
-    float bounce;
     PPQuaternion rot;
-
     PPVec3 vel;
     PPVec3 acc;
-    float damping;
-
     PPVec3 a_vel;
     PPVec3 a_acc;
+
+    float bounce;
+    float friction;
+    float damping;
     float a_damping;
 
     float mass;
-    float friction;
-    PPMat3 inertia;
     float inv_mass;
+
+    PPMat3 inertia;
+    PPMat3 inv_inertia;
 
     BodyKind kind;
 
@@ -203,6 +210,9 @@ typedef struct _PPBody {
 
     bool is_alive;
     void* user_data;
+
+    float vel_limit;
+    float a_vel_limit;
 } PPBody;
 
 
@@ -223,6 +233,7 @@ typedef struct _PPTriangle {
     PPVec3 n;
     PPPlane p;
     BodyKind kind;
+    float bounce;
     float friction;
 } PPTriangle;
 
@@ -236,6 +247,7 @@ PPVec3* pp_vec3_scale(const PPVec3* v1, float t, PPVec3* out);
 PPVec3* pp_vec3_assign(PPVec3* target, const PPVec3* source);
 bool pp_vec3_normalize(PPVec3* target);
 float pp_vec3_length(const PPVec3* v1);
+float pp_vec3_length_sq(const PPVec3* v1);
 
 PPQuaternion* pp_quat_init(PPQuaternion* q);
 void pp_quat_between(const PPVec3* v0, const PPVec3* q1, PPQuaternion* result);
@@ -243,8 +255,8 @@ void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQu
 PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source);
 float pp_quat_angle_between(const PPQuaternion* q0, const PPQuaternion* q1);
 
-void pp_physics_step(float t);
-bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance);
+void pp_physics_step(float t, int iterations);
+bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, BodyKind* ignore_kinds, const PPBody** body_hit, const PPTriangle** tri_hit, float* distance, PPVec3* intersection);
 void pp_physics_clear();
 void pp_physics_set_gravity(const PPVec3* v);
 bool pp_physics_collision_map_add(BodyKind kind1, BodyKind kind2, void* user_data, bool (*callback)(const void*, const void*, BodyKind, BodyKind, const PPCollision* c, const void*));
@@ -279,6 +291,8 @@ void pp_body_get_rotation(PPBody* s, PPQuaternion* rot);
 float pp_body_get_radius(PPBody* s);
 void pp_body_set_user_data(PPBody* s, void* data);
 void* pp_body_get_user_data(const PPBody* s);
+void pp_body_set_kind(PPBody* b, BodyKind kind);
+BodyKind pp_body_get_kind(const PPBody* b);
 bool pp_body_set_friction(PPBody* s, float f);
 void pp_body_get_velocity(const PPBody* s, PPVec3* vel);
 void pp_body_get_velocity_at_position(const PPBody* b, const PPVec3* p, PPVec3* ret);
@@ -287,6 +301,24 @@ void pp_body_set_velocity(PPBody* s, float x, float y, float z);
 void pp_body_set_angular_acceleration(PPBody* s, float x, float y, float z);
 void pp_body_set_acceleration(PPBody* s, float x, float y, float z);
 void pp_body_look_at(PPBody* s, float x, float y, float z);
+
+/**
+ * Limit the maximium velocity of the object. The limit will be applied after
+ * adding acceleration forces. Passing 0.0f will remove the limit.
+ *
+ * @param body The body whose velocity will be restricted
+ * @param speed A the desired velocity limit.
+ */
+void pp_body_limit_velocity(PPBody* body, float speed);
+
+/**
+ * Limit the maximium angular velocity of the object. The limit will be applied after
+ * adding acceleration forces. Passing 0.0f will remove the limit.
+ *
+ * @param body The body whose angular velocity will be restricted
+ * @param speed A the desired angular velocity limit.
+ */
+void pp_body_limit_angular_velocity(PPBody* body, float speed);
 
 #ifdef __cplusplus
 }
@@ -298,12 +330,16 @@ void pp_body_look_at(PPBody* s, float x, float y, float z);
 
 #define EPA_DEBUG 0
 
-#ifndef PHYSICS_MAX_OBJECTS
-    #define PHYSICS_MAX_OBJECTS 32
+#ifndef PICOPHYSICS_MAX_OBJECTS
+    #define PICOPHYSICS_MAX_OBJECTS 32
 #endif
 
-#ifndef PHYSICS_MAX_TRIANGLES
-    #define PHYSICS_MAX_TRIANGLES 128
+#ifndef PICOPHYSICS_MAX_TRIANGLES
+    #define PICOPHYSICS_MAX_TRIANGLES 128
+#endif
+
+#ifndef PICOPHYSICS_MAX_MANIFOLDS
+    #define PICOPHYSICS_MAX_MANIFOLDS 256
 #endif
 
 typedef union _PPObject {
@@ -311,11 +347,15 @@ typedef union _PPObject {
     struct _PPBox b;
 } PPObject;
 
-static PPObject objects[PHYSICS_MAX_OBJECTS];
+static PPObject objects[PICOPHYSICS_MAX_OBJECTS];
 static int object_count = 0;
 static int dead_object_count = 0;
 
-static PPTriangle tris[PHYSICS_MAX_TRIANGLES];
+static PPBody trimesh_body = {
+    .type = PP_OBJECT_TYPE_TRIANGLE,
+};
+
+static PPTriangle tris[PICOPHYSICS_MAX_TRIANGLES];
 static int tri_count = 0;
 
 static struct _PPCollisionMapEntry {
@@ -420,6 +460,53 @@ bool pp_vec3_normalize(PPVec3 *v) {
         pp_vec3_init(v);
         return false;
     }
+}
+
+void pp_mat3_inverse(const PPMat3* in, PPMat3* out) {
+    const float* m = in->m;
+
+    float a = m[0], d = m[3], g = m[6];
+    float b = m[1], e = m[4], h = m[7];
+    float c = m[2], f = m[5], i = m[8];
+
+    // Cofactors
+    float A =  (e * i - f * h);
+    float B = -(d * i - f * g);
+    float C =  (d * h - e * g);
+    float D = -(b * i - c * h);
+    float E =  (a * i - c * g);
+    float F = -(a * h - b * g);
+    float G =  (b * f - c * e);
+    float H = -(a * f - c * d);
+    float I =  (a * e - b * d);
+
+    // Determinant
+    float det = a * A + d * D + g * G;
+
+    float inv_det = 1.0f / det;
+
+    // Adjugate (still column-major)
+    out->m[0] = A * inv_det;
+    out->m[1] = D * inv_det;
+    out->m[2] = G * inv_det;
+
+    out->m[3] = B * inv_det;
+    out->m[4] = E * inv_det;
+    out->m[5] = H * inv_det;
+
+    out->m[6] = C * inv_det;
+    out->m[7] = F * inv_det;
+    out->m[8] = I * inv_det;
+}
+
+void pp_mat3_mult(const PPMat3* m, const PPVec3* p, PPVec3* pout) {
+    float x = p->x;
+    float y = p->y;
+    float z = p->z;
+
+    pout->x = m->m[0] * x + m->m[3] * y + m->m[6] * z;
+    pout->y = m->m[1] * x + m->m[4] * y + m->m[7] * z;
+    pout->z = m->m[2] * x + m->m[5] * y + m->m[8] * z;
 }
 
 PPQuaternion* pp_quat_init(PPQuaternion* q) {
@@ -597,56 +684,163 @@ static float pp_plane_distance(const PPVec3* n, const float d, const PPVec3* p) 
     return numerator / denominator;
 }
 
+bool pp_box_intersect(const PPBox* sphere, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance);
 bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance);
 bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance);
+
+bool pp_contains_kind(BodyKind* kinds, BodyKind kind) {
+    if(!kinds) {
+        return false;
+    }
+
+    BodyKind* k = kinds;
+    while(*k) {
+        if(*k == kind) {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 /**
  * Intersects the world with the specified ray. Returns true if something was hit.
  *
  * If a hit was detected, then either sphere_hit or tri_hit will be populated (depending on what was hit) and the distance from the
  * origin to the hit will be returned.
+ *
+ * ignore_kinds is an array of kinds to ignore, with a 0 terminated final entry.
  */
-bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, PPSphere** sphere_hit, PPTriangle** tri_hit, float* distance) {
-    float closest_dist = FLT_MAX;
-    const PPTriangle* closest_tri = NULL;
-    const PPSphere* closest_sphere = NULL;
+ bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, BodyKind* ignore_kinds, const PPBody** body_hit, const PPTriangle** tri_hit, float* distance, PPVec3* intersection) {
+     float closest_dist = FLT_MAX;
+     const PPTriangle* closest_tri = NULL;
+     const PPBody* closest_body = NULL;
+     PPVec3 closest_intersection;
 
-    for (int i = 0; i < (int) pp_physics_triangle_count(); ++i) {
-        const PPTriangle* t = pp_physics_triangle_at(i);
+     for(int i = 0; i < pp_physics_triangle_count(); ++i) {
+         const PPTriangle* t = pp_physics_triangle_at(i);
 
-        PPVec3 hit;
-        float dist;
-        if(pp_tri_intersect(t, origin, direction, &hit, &dist)){
-            if(dist < closest_dist) {
-                closest_tri = t;
-                closest_dist = dist;
-            }
-        }
+         PPVec3 hit;
+         float dist;
+         if(pp_tri_intersect(t, origin, direction, &hit, &dist)){
+             if(pp_contains_kind(ignore_kinds, t->kind)) {
+                 continue;
+             }
+
+             if(dist < closest_dist) {
+                 closest_tri = t;
+                 closest_dist = dist;
+                 pp_vec3_assign(&closest_intersection, &hit);
+             }
+         }
+     }
+
+     for(int i = 0; i < pp_physics_body_total_count(); ++i) {
+         const PPBody* body = pp_physics_body_at(i);
+         if(!body->is_alive) {
+             continue;
+         }
+
+         if(body->type == PP_OBJECT_TYPE_SPHERE) {
+             const PPSphere* s = PP_SPHERE(body);
+
+             assert(s);
+             PPVec3 hit;
+             float dist;
+             if(pp_sphere_intersect(s, origin, direction, &hit, &dist)) {
+                 if(pp_contains_kind(ignore_kinds, s->body.kind)) {
+                     continue;
+                 }
+
+                 if(dist < closest_dist) {
+                     closest_body = body;
+                     closest_tri = NULL;
+                     closest_dist = dist;
+                     pp_vec3_assign(&closest_intersection, &hit);
+                 }
+             }
+         } else if(body->type == PP_OBJECT_TYPE_BOX) {
+             const PPBox* b = PP_BOX(body);
+
+             assert(b);
+             PPVec3 hit;
+             float dist;
+             if(pp_box_intersect(b, origin, direction, &hit, &dist)) {
+                 if(pp_contains_kind(ignore_kinds, b->body.kind)) {
+                     continue;
+                 }
+
+                 if(dist < closest_dist) {
+                     closest_body = body;
+                     closest_tri = NULL;
+                     closest_dist = dist;
+                     pp_vec3_assign(&closest_intersection, &hit);
+                 }
+             }
+         }
+     }
+
+     if(closest_dist == FLT_MAX) {
+         return false;
+     }
+
+     if(body_hit) {
+         *body_hit = closest_body;
+     }
+
+     if(tri_hit) {
+         *tri_hit = (PPTriangle*) closest_tri;
+     }
+     if(distance) {
+         *distance = closest_dist;
+     }
+     if(intersection) {
+         pp_vec3_assign(intersection, &closest_intersection);
+     }
+     return true;
+}
+
+bool pp_aabb_intersect(const PPVec3* pos, const PPVec3* whd, const PPVec3* origin, const PPVec3* direction, PPVec3* out, float* distance) {
+    PPVec3 extents = {whd->x * 0.5f, whd->y * 0.5f, whd->z * 0.5f};
+    PPVec3 min = {pos->x - extents.x, pos->y - extents.y, pos->z - extents.z};
+    PPVec3 max = {pos->x + extents.x, pos->y + extents.y, pos->z + extents.z};
+    PPVec3 n_inv = {1.0f / direction->x, 1.0f / direction->y, 1.0f / direction->z};
+
+    const float t1 = (min.x - origin->x) * n_inv.x;
+    const float t2 = (max.x - origin->x) * n_inv.x;
+    const float t3 = (min.y - origin->y) * n_inv.y;
+    const float t4 = (max.y - origin->y) * n_inv.y;
+    const float t5 = (min.z - origin->z) * n_inv.z;
+    const float t6 = (max.z - origin->z) * n_inv.z;
+
+    const float tmin = fmax(fmax(fmin(t1, t2), fmin(t3, t4)), fmin(t5, t6));
+    const float tmax = fmin(fmin(fmax(t1, t2), fmax(t3, t4)), fmax(t5, t6));
+
+    // if tmax < 0, ray (line) is intersecting AABB, but whole AABB is behind us
+    if(tmax < 0) {
+        return false;
     }
 
-    for (int i = 0; i < (int) pp_physics_body_total_count(); ++i) {
-        const PPBody* body = pp_physics_body_at(i);
-        const PPSphere* s = PP_SPHERE(body);
-
-        if(!s || !body->is_alive) {
-            continue;
-        }
-
-        PPVec3 hit;
-        float dist;
-        if(pp_sphere_intersect(s, origin, direction, &hit, &dist)) {
-            if(dist < closest_dist) {
-                closest_sphere = s;
-                closest_tri = NULL;
-                closest_dist = dist;
-            }
-        }
+    // if tmin > tmax, ray doesn't intersect AABB
+    if (tmin > tmax) {
+        return false;
     }
 
-    *sphere_hit = (PPSphere*) closest_sphere;
-    *tri_hit = (PPTriangle*) closest_tri;
-    *distance = closest_dist;
+    *distance = tmin;
+    pp_vec3_scale(direction, tmin, out);
+    pp_vec3_add(origin, out, out);
     return true;
+}
+
+bool pp_box_intersect(const PPBox* box, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance) {
+    // Transform the ray into the box's local space
+    PPVec3 local_origin;
+    PPVec3 local_direction;
+    pp_vec3_sub(o, &box->body.pos, &local_origin);
+    pp_quat_transform(&box->body.rot, &local_origin, &local_origin);
+    pp_quat_transform(&box->body.rot, d, &local_direction);
+
+    return pp_aabb_intersect(&box->body.pos, &box->whd, o, d, out, distance);
 }
 
 bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance) {
@@ -690,6 +884,43 @@ bool pp_sphere_intersect(const PPSphere* sphere, const PPVec3* o, const PPVec3* 
 }
 
 bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, PPVec3* out, float* distance) {
+    // PPVec3 v0v1, v0v2, pvec;
+    // pp_vec3_sub(&tri->v[1], &tri->v[0], &v0v1);
+    // pp_vec3_sub(&tri->v[1], &tri->v[0], &v0v1);
+    // pp_vec3_cross(d, &v0v2, &pvec);
+    // float det = pp_vec3_dot(&v0v1, &pvec);
+
+    // // If the determinant is negative, the triangle is back-facing.
+    // // If the determinant is close to 0, the ray misses the triangle.
+    // // if (det < FLT_EPSILON) return false;
+
+    // // If det is close to 0, the ray and triangle are parallel.
+    // if (fabs(det) < FLT_EPSILON) {
+    //     return false;
+    // }
+
+    // float invDet = 1 / det;
+
+    // PPVec3 tvec;
+    // pp_vec3_sub(o, &tri->v[0], &tvec);
+    // float u = pp_vec3_dot(&tvec, &pvec) * invDet;
+
+    // if (u < 0 || u > 1) {
+    //     return false;
+    // }
+
+    // PPVec3 qvec;
+    // pp_vec3_cross(&tvec, &v0v1, &qvec);
+
+    // float v = pp_vec3_dot(d, &qvec) * invDet;
+    // if (v < 0 || u + v > 1) {
+    //     return false;
+    // }
+
+    // float t = pp_vec3_dot(&v0v2, &qvec) * invDet;
+
+    // return true;
+
     const float e = FLT_EPSILON;
     PPVec3 edge1, edge2, cross_e1, cross_e2, s;
     pp_vec3_sub(&tri->v[1], &tri->v[0], &edge1);
@@ -731,6 +962,14 @@ bool pp_tri_intersect(const PPTriangle* tri, const PPVec3* o, const PPVec3* d, P
     }
 
     return true;
+}
+
+void pp_body_set_kind(PPBody* b, BodyKind kind) {
+    b->kind = kind;
+}
+
+BodyKind pp_body_get_kind(const PPBody* b) {
+    return b->kind;
 }
 
 void pp_body_set_angular_velocity(PPBody* s, float x, float y, float z) {
@@ -853,6 +1092,22 @@ void pp_body_look_at(PPBody* s, float x, float y, float z) {
     pp_body_add_angular_force(s, torque.xyz[0], torque.xyz[1], torque.xyz[2]);
 }
 
+void pp_body_limit_velocity(PPBody* body, float speed) {
+    if(speed < 0.0f) {
+        return;
+    }
+
+    body->vel_limit = speed;
+}
+
+void pp_body_limit_angular_velocity(PPBody* body, float speed) {
+    if(speed < 0.0f) {
+        return;
+    }
+
+    body->a_vel_limit = speed;
+}
+
 static void pp_body_init(PPBody* body, const PPVec3* pos, float mass, BodyKind kind) {
     body->is_alive = true;
     body->user_data = NULL;
@@ -862,13 +1117,21 @@ static void pp_body_init(PPBody* body, const PPVec3* pos, float mass, BodyKind k
     pp_vec3_init(&body->a_vel);
     pp_vec3_init(&body->a_acc);
     pp_quat_init(&body->rot);
-    pp_vec3_set(&body->pos, pos->x, pos->y, pos->z);
+
+    if(pos) {
+        pp_vec3_set(&body->pos, pos->x, pos->y, pos->z);
+    } else {
+        pp_vec3_set(&body->pos, 0.0f, 0.0f, 0.0f);
+    }
+
     body->kind = kind;
     body->mass = mass;
     body->inv_mass = 1.0f / mass;
     body->friction = 0.3f;
     body->damping = 0.01f;
     body->a_damping = 0.02f;
+    body->vel_limit = 0.0f;
+    body->a_vel_limit = 0.0f;
     pp_body_set_bounce(body, 0.5f);
 }
 
@@ -876,6 +1139,9 @@ PPSphere* pp_sphere_init(PPSphere* s, float radius, const PPVec3* pos, float mas
     s->radius = radius;
     s->body.type = PP_OBJECT_TYPE_SPHERE;
     s->body.inertia.m[0] = (2.0f / 5.0f) * mass * radius * radius;
+    s->body.inertia.m[4] = s->body.inertia.m[0];
+    s->body.inertia.m[8] = s->body.inertia.m[0];
+    pp_mat3_inverse(&s->body.inertia, &s->body.inv_inertia);
     pp_body_init(&s->body, pos, mass, kind);
     return s;
 }
@@ -893,6 +1159,7 @@ PPBox* pp_box_init(PPBox* s, float width, float height, float depth, const PPVec
     s->body.inertia.m[4] = oot * mass * (d2 + h2);
     s->body.inertia.m[8] = oot * mass * (d2 + w2);
 
+    pp_mat3_inverse(&s->body.inertia, &s->body.inv_inertia);
     pp_body_init(&s->body, pos, mass, kind);
 
     pp_vec3_set(&s->whd, width, height, depth);
@@ -938,6 +1205,15 @@ void pp_body_get_velocity(const PPBody* s, PPVec3* vel) {
 
 void pp_body_get_rotation(PPBody* s, PPQuaternion* rot) {
     pp_quat_assign(rot, &s->rot);
+}
+
+bool pp_body_set_friction(PPBody* s, float f) {
+    if(!s || f < 0.0f || f > 1.0f) {
+        return false;
+    }
+
+    s->friction = f;
+    return true;
 }
 
 bool pp_body_set_bounce(PPBody* s, float b) {
@@ -1011,6 +1287,10 @@ void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, co
     pp_vec3_assign(&c->n, n);
     c->obj1 = PP_BODY(lhs);
     c->obj2 = PP_BODY(rhs);
+    c->obj1_bounce = c->obj1->bounce;
+    c->obj2_bounce = c->obj2->bounce;
+    c->obj1_friction = c->obj1->friction;
+    c->obj2_friction = c->obj2->friction;
     c->type1 = PP_OBJECT_TYPE_SPHERE;
     c->type2 = PP_OBJECT_TYPE_BOX;
     c->kind1 = lhs->body.kind;
@@ -1018,7 +1298,7 @@ void pp_fill_collision_info_sphere_box(const PPSphere* lhs, const PPBox* rhs, co
 }
 
 void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* rhs, float dist, PPCollision* c) {
-    pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &c->n);
+    pp_vec3_sub(&rhs->body.pos, &lhs->body.pos, &c->n);
     c->dist = dist;
     if(dist > 0) {
         c->n.xyz[0] /= dist;
@@ -1036,6 +1316,10 @@ void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* r
 
     c->obj1 = PP_BODY(lhs);
     c->obj2 = PP_BODY(rhs);
+    c->obj1_bounce = c->obj1->bounce;
+    c->obj2_bounce = c->obj2->bounce;
+    c->obj1_friction = c->obj1->friction;
+    c->obj2_friction = c->obj2->friction;
     c->type1 = PP_OBJECT_TYPE_SPHERE;
     c->type2 = PP_OBJECT_TYPE_SPHERE;
     c->kind1 = lhs->body.kind;
@@ -1043,11 +1327,15 @@ void pp_fill_collision_info_sphere_sphere(const PPSphere* lhs, const PPSphere* r
 }
 
 void pp_fill_collision_info_sphere_triangle(const PPSphere* lhs, const PPTriangle* tri, const PPVec3* p, float dist, PPCollision* c) {
-    pp_vec3_scale(&tri->n, 1.0f, &c->n); // Copy
+    pp_vec3_scale(&tri->n, -1.0f, &c->n);
     pp_vec3_scale(p, 1.0f, &c->p); // Copy
     c->dist = dist;
     c->obj1 = PP_BODY(lhs);
-    c->obj2 = NULL;
+    c->obj2 = &trimesh_body;
+    c->obj1_bounce = c->obj1->bounce;
+    c->obj2_bounce = 0.0f; // FIXME
+    c->obj1_friction = c->obj1->friction;
+    c->obj2_friction = tri->friction;
     c->type1 = PP_OBJECT_TYPE_SPHERE;
     c->type2 = PP_OBJECT_TYPE_TRIANGLE;
     c->kind1 = lhs->body.kind;
@@ -1116,7 +1404,8 @@ PPTriangle* pp_physics_create_triangle(const PPVec3* v1, const PPVec3* v2, const
     pp_vec3_cross(&e1, &e2, &tri->n);
     pp_vec3_normalize(&tri->n);
 
-    tri->friction = 0.1f;
+    tri->bounce = 0.0f;
+    tri->friction = 0.9f;
     tri->kind = kind;
 
     return tri;
@@ -1151,6 +1440,10 @@ const PPTriangle* pp_physics_triangle_at(size_t i) {
 }
 
 void pp_physics_destroy_body(PPBody* b) {
+    if(!b) {
+        return;
+    }
+
     b->is_alive = false;
     ++dead_object_count;
 }
@@ -1161,7 +1454,84 @@ void pp_physics_set_gravity(const PPVec3* v) {
 }
 
 
-static void pp_solve(const PPCollision* manifold) {
+static void pp_move_bodies(float t) {
+    PPVec3 scaled_vel;
+    // Apply acceleration to velocity
+    for(int i = 0; i < object_count; ++i) {
+        PPBody* body = (PPBody*) &objects[i];
+
+        if(!body->is_alive) {
+            continue;
+        }
+
+        // Apply gravity to acceleration before applying acceleration
+        // to velocity
+        pp_vec3_add(&body->acc, &gravity, &body->acc);
+
+        pp_vec3_scale(&body->acc, t, &scaled_vel);
+        pp_vec3_add(&body->vel, &scaled_vel, &body->vel);
+        pp_vec3_init(&body->acc);
+
+        // Apply linear damping
+        pp_vec3_scale(&body->vel, 1.0f - body->damping, &body->vel);
+
+        if(body->lock) {
+            if((body->lock & PP_AXIS_LOCK_PITCH) == PP_AXIS_LOCK_PITCH) {
+                body->a_acc.xyz[0] = 0.0f;
+                body->a_vel.xyz[0] = 0.0f;
+            }
+
+            if((body->lock & PP_AXIS_LOCK_YAW) == PP_AXIS_LOCK_YAW) {
+                body->a_acc.xyz[1] = 0.0f;
+                body->a_vel.xyz[1] = 0.0f;
+            }
+
+            if((body->lock & PP_AXIS_LOCK_ROLL) == PP_AXIS_LOCK_ROLL) {
+                body->a_acc.xyz[2] = 0.0f;
+                body->a_vel.xyz[2] = 0.0f;
+            }
+        }
+
+        PPVec3 scaled_ang_vel; // Temporary variable to store scaled angular velocity
+        pp_vec3_scale(&body->a_acc, t, &scaled_ang_vel);
+        pp_vec3_add(&body->a_vel, &scaled_ang_vel, &body->a_vel);
+
+        // Apply angular damping if desired
+        pp_vec3_scale(&body->a_vel, 1.0f - body->a_damping, &body->a_vel);
+
+        // Reset the acceleration
+        pp_vec3_init(&body->a_acc);
+
+        // Apply any limits
+        if(body->vel_limit != 0.0f && pp_vec3_length_sq(&body->vel) > body->vel_limit) {
+            pp_vec3_normalize(&body->vel);
+            pp_vec3_scale(&body->vel, body->vel_limit, &body->vel);
+        }
+
+        if(body->a_vel_limit != 0.0f && pp_vec3_length_sq(&body->a_vel) > body->a_vel_limit) {
+            pp_vec3_normalize(&body->a_vel);
+            pp_vec3_scale(&body->a_vel, body->a_vel_limit, &body->a_vel);
+        }
+    }
+
+    // Move all spheres by their velocity
+    for(int i = 0; i < object_count; ++i) {
+        PPBody* body = (PPBody*) &objects[i];
+        if(!body->is_alive) {
+            continue;
+        }
+
+        pp_vec3_scale(&body->vel, t, &scaled_vel);
+        pp_vec3_add(&body->pos, &scaled_vel, &body->pos);
+
+        PPQuaternion q_rot;
+        pp_quat_from_angular_velocity(&body->a_vel, t, &q_rot); // Get rotation quaternion from angular velocity
+        pp_quat_multiply(&body->rot, &q_rot, &body->rot); // Combine with current rotation
+        pp_quat_normalize(&body->rot); // Normalize the quaternion
+    }
+}
+
+static void pp_solve(const PPCollision* manifold, float step) {
     PPBody* lhs = PP_BODY(manifold->obj1);
     PPBody* rhs = PP_BODY(manifold->obj2);
 
@@ -1172,21 +1542,39 @@ static void pp_solve(const PPCollision* manifold) {
     float vel_along_normal = 0.0f;
     PPVec3 rel_vel = {.xyz={0.0f, 0.0f, 0.0f}};
 
-    if(rhs) {
-        pp_vec3_scale(&manifold->n, overlap * 0.5f, &adjustment_lhs);
-        pp_vec3_scale(&manifold->n, overlap * 0.5f, &adjustment_rhs);
-        pp_vec3_add(&lhs->pos, &adjustment_lhs, &lhs->pos);
-        pp_vec3_sub(&rhs->pos, &adjustment_rhs, &rhs->pos);
+    PPVec3 lhs_pcp = {.xyz={0.0f, 0.0f, 0.0f}}, rhs_pcp = {.xyz={0.0f, 0.0f, 0.0f}};
+    float inv_mass_sum = lhs->inv_mass + rhs->inv_mass;
 
-        pp_vec3_sub(&rhs->vel, &lhs->vel, &rel_vel);   // v_rhs – v_lhs
-        vel_along_normal = pp_vec3_dot(&rel_vel, &manifold->n);
-    } else {
-        pp_vec3_scale(&manifold->n, overlap, &adjustment_lhs);
-        pp_vec3_add(&lhs->pos, &adjustment_lhs, &lhs->pos);
-        pp_vec3_assign(&rel_vel, &lhs->vel);
+    float lhs_ratio = lhs->inv_mass / inv_mass_sum;
+    float rhs_ratio = rhs->inv_mass / inv_mass_sum;
 
-        vel_along_normal = pp_vec3_dot(&lhs->vel, &manifold->n);
+    pp_vec3_scale(&manifold->n, overlap * lhs_ratio, &adjustment_lhs);
+    pp_vec3_scale(&manifold->n, overlap * rhs_ratio, &adjustment_rhs);
+    pp_vec3_sub(&lhs->pos, &adjustment_lhs, &lhs->pos);
+    pp_vec3_add(&rhs->pos, &adjustment_rhs, &rhs->pos);
+
+    // Position (CoM) to contact point (r_a/r_b). Don't set this
+    // if the inv_mass is zero and then it has no effect later on
+    if(lhs->inv_mass > FLT_EPSILON) {
+        pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_pcp);
     }
+
+    if(rhs->inv_mass > FLT_EPSILON) {
+        pp_vec3_sub(&manifold->p, &rhs->pos, &rhs_pcp);
+    }
+
+    // Velocities at contact point
+    PPVec3 lhs_vel, rhs_vel;
+    pp_vec3_cross(&lhs->a_vel, &lhs_pcp, &lhs_vel);
+    pp_vec3_cross(&rhs->a_vel, &rhs_pcp, &rhs_vel);
+    pp_vec3_add(&lhs_vel, &lhs->vel, &lhs_vel);
+    pp_vec3_add(&rhs_vel, &rhs->vel, &rhs_vel);
+
+    // Relative velocity at contact point
+    pp_vec3_sub(&rhs_vel, &lhs_vel, &rel_vel);   // v_rhs – v_lhs
+
+
+    vel_along_normal = pp_vec3_dot(&rel_vel, &manifold->n);
 
     if (vel_along_normal < 0) {
         PPVec3 penetration, tangent;
@@ -1194,121 +1582,163 @@ static void pp_solve(const PPCollision* manifold) {
         pp_vec3_sub(&rel_vel, &penetration, &tangent);
 
         // Moving towards each other
-        float r = fmax(lhs->bounce, (rhs) ? rhs->bounce : 0.0f);
-        float f = fmin(lhs->friction, (rhs) ? rhs->friction : 10000.0f);
+        float r = fmax(manifold->obj1_bounce, manifold->obj2_bounce);
 
-        float inv_mass_sum = lhs->inv_mass + ((rhs && rhs->inv_mass) ? rhs->inv_mass : 0.0f);
-        float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
-        PPVec3 impulse_n;
-        pp_vec3_scale(&manifold->n, j_n, &impulse_n);
-
-        float jt = -pp_vec3_dot(&rel_vel, &tangent) / inv_mass_sum;
-        jt = fmax(-j_n * f, fmin(jt, j_n * f));   // clamp to μ·|j_n|
-        PPVec3 impulse_t;
-        pp_vec3_normalize(&tangent);      // ensure unit tangent
-        pp_vec3_scale(&tangent, jt, &impulse_t);
-
-        PPVec3 impulse;
-        pp_vec3_add(&impulse_n, &impulse_t, &impulse);
-
-        PPVec3 dv_lhs, dv_rhs;
-        pp_vec3_scale(&impulse, lhs->inv_mass, &dv_lhs);
-        pp_vec3_add(&lhs->vel, &dv_lhs, &lhs->vel);   // v_lhs ← v_lhs + Δv
-
-        if(rhs) {
-            pp_vec3_scale(&impulse, rhs->inv_mass, &dv_rhs);
-            pp_vec3_sub(&rhs->vel, &dv_rhs, &rhs->vel);   // v_rhs ← v_rhs + Δv
+        const float bounce_threshold = 1.0f;
+        if (fabs(vel_along_normal) < bounce_threshold) {
+            // If we're not moving, then don't add bounce!
+            r = 0.0f;
         }
-    }
-}
 
-static void pp_sphere_box_response(PPSphere* sphere, PPBox* box, const PPCollision* c, float t) {
-    // c->dist is the distance between the sphere center and the contact point
-    // so the "overlap" is the radius minus the distance
-    float overlap = sphere->radius - c->dist;
+        float f = manifold->obj1_friction * manifold->obj2_friction;
 
-    PPVec3 adjustment_lhs, adjustment_rhs;
-    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_lhs);
-    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_rhs);
-    pp_vec3_add(&sphere->body.pos, &adjustment_lhs, &sphere->body.pos);
-    pp_vec3_sub(&box->body.pos, &adjustment_rhs, &box->body.pos);
+        // Baumgarte positional bias (Stabilisation)
+        float slop = 0.01f;
+        float beta = 0.2f;
 
-    PPVec3 rel_vel;
-    pp_vec3_sub(&box->body.vel, &sphere->body.vel, &rel_vel);   // v_rhs – v_lhs
-    float vel_along_normal = pp_vec3_dot(&rel_vel, &c->n);
-    if (vel_along_normal < 0) {
-        PPVec3 penetration, tangent;
-        pp_vec3_scale(&c->n, vel_along_normal, &penetration);
-        pp_vec3_sub(&rel_vel, &penetration, &tangent);
+        float pen = manifold->dist - slop;
+        if(pen < 0.0f) {
+            pen = 0.0f;
+        }
 
-        // Moving towards each other
-        float r = fmax(sphere->body.bounce, box->body.bounce);
-        float f = fmin(sphere->body.friction, box->body.friction);
+        float bias = beta * pen / step;
+        float numerator = -(1.0f + r) * vel_along_normal - bias;
+        float linear_term = pp_vec3_dot(&manifold->n, &manifold->n) * inv_mass_sum;
 
-        float inv_mass_sum = sphere->body.inv_mass + box->body.inv_mass;
-        float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
-        PPVec3 impulse_n;
-        pp_vec3_scale(&c->n, j_n, &impulse_n);
+        // rhs_pcp might be zero here, but that's fine as it'll cause
+        // zero contribution to the angular velocity
+        PPVec3 lhs_pcp_cross_n, rhs_pcp_cross_n;
+        pp_vec3_cross(&lhs_pcp, &manifold->n, &lhs_pcp_cross_n);
+        pp_mat3_mult(&lhs->inv_inertia, &lhs_pcp_cross_n, &lhs_pcp_cross_n);
 
-        float jt = -pp_vec3_dot(&rel_vel, &tangent) / inv_mass_sum;
-        jt = fmax(-j_n * f, fmin(jt, j_n * f));   // clamp to μ·|j_n|
-        PPVec3 impulse_t;
-        pp_vec3_normalize(&tangent);      // ensure unit tangent
-        pp_vec3_scale(&tangent, jt, &impulse_t);
+        pp_vec3_cross(&rhs_pcp, &manifold->n, &rhs_pcp_cross_n);
+        pp_mat3_mult(&rhs->inv_inertia, &rhs_pcp_cross_n, &rhs_pcp_cross_n);
 
-        PPVec3 impulse;
-        pp_vec3_add(&impulse_n, &impulse_t, &impulse);
+        PPVec3 lhs_angular_term, rhs_angular_term, combined_angular_term;
+        pp_vec3_cross(&lhs_pcp, &lhs_pcp_cross_n, &lhs_angular_term);
+        pp_vec3_cross(&rhs_pcp, &rhs_pcp_cross_n, &rhs_angular_term);
+        pp_vec3_add(&lhs_angular_term, &rhs_angular_term, &combined_angular_term);
+
+        float angular_term = pp_vec3_dot(&combined_angular_term, &manifold->n);
+
+        float denominator = linear_term + angular_term;
+        float J = numerator / denominator;
+
+        PPVec3 impulse, ang_imp;
+        pp_vec3_scale(&manifold->n, J, &impulse);
 
         PPVec3 dv_lhs, dv_rhs;
-        pp_vec3_scale(&impulse, sphere->body.inv_mass, &dv_lhs);
-        pp_vec3_scale(&impulse, box->body.inv_mass, &dv_rhs);
+        // lhs
+        pp_vec3_scale(&impulse, lhs->inv_mass, &dv_lhs);
+        pp_vec3_sub(&lhs->vel, &dv_lhs, &lhs->vel); // v_lhs ← v_lhs + Δv
 
-        pp_vec3_add(&sphere->body.vel, &dv_lhs, &sphere->body.vel);   // v_lhs ← v_lhs + Δv
-        pp_vec3_sub(&box->body.vel, &dv_rhs, &box->body.vel);   // v_rhs ← v_rhs + Δv
-    }
-}
+        // rhs
+        pp_vec3_scale(&impulse, rhs->inv_mass, &dv_rhs);
+        pp_vec3_add(&rhs->vel, &dv_rhs, &rhs->vel);
 
-static void pp_sphere_sphere_response(PPSphere* lhs, PPSphere* rhs, const PPCollision* c) {
-    float overlap = (lhs->radius + rhs->radius) - c->dist;
+        // lhs
+        pp_vec3_cross(&lhs_pcp, &impulse, &ang_imp);
+        pp_mat3_mult(&lhs->inv_inertia, &ang_imp, &ang_imp);
+        pp_vec3_add(&lhs->a_vel, &ang_imp, &lhs->a_vel);
 
-    PPVec3 adjustment_lhs, adjustment_rhs;
-    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_lhs);
-    pp_vec3_scale(&c->n, overlap * 0.5f, &adjustment_rhs);
-    pp_vec3_add(&lhs->body.pos, &adjustment_lhs, &lhs->body.pos);
-    pp_vec3_sub(&rhs->body.pos, &adjustment_rhs, &rhs->body.pos);
+        // rhs
+        pp_vec3_cross(&rhs_pcp, &impulse, &ang_imp);
+        pp_mat3_mult(&rhs->inv_inertia, &ang_imp, &ang_imp);
+        pp_vec3_sub(&rhs->a_vel, &ang_imp, &rhs->a_vel);
 
-    PPVec3 rel_vel;
-    pp_vec3_sub(&rhs->body.vel, &lhs->body.vel, &rel_vel);   // v_rhs – v_lhs
-    float vel_along_normal = pp_vec3_dot(&rel_vel, &c->n);
-    if (vel_along_normal < 0) {
-        PPVec3 penetration, tangent;
-        pp_vec3_scale(&c->n, vel_along_normal, &penetration);
-        pp_vec3_sub(&rel_vel, &penetration, &tangent);
+        // Friction!!!
+        float u = f; // Friction coefficient
+        float lhs_im = lhs->inv_mass;
+        float rhs_im = rhs->inv_mass;
+        PPVec3 lhs_fv, rhs_fv;
 
-        // Moving towards each other
-        float r = fmax(lhs->body.bounce, rhs->body.bounce);
-        float f = fmin(lhs->body.friction, rhs->body.friction);
+        // Calculate velocities at the contact point
+        pp_vec3_cross(&lhs->a_vel, &lhs_pcp, &lhs_fv);
+        pp_vec3_add(&lhs_fv, &lhs->vel, &lhs_fv);
 
-        float inv_mass_sum = lhs->body.inv_mass + rhs->body.inv_mass;
-        float j_n = -(1.0f + r) * vel_along_normal / inv_mass_sum;
-        PPVec3 impulse_n;
-        pp_vec3_scale(&c->n, j_n, &impulse_n);
+        pp_vec3_cross(&rhs->a_vel, &rhs_pcp, &rhs_fv);
+        pp_vec3_add(&rhs_fv, &rhs->vel, &rhs_fv);
 
-        float jt = -pp_vec3_dot(&rel_vel, &tangent) / inv_mass_sum;
-        jt = fmax(-j_n * f, fmin(jt, j_n * f));   // clamp to μ·|j_n|
-        PPVec3 impulse_t;
-        pp_vec3_normalize(&tangent);      // ensure unit tangent
-        pp_vec3_scale(&tangent, jt, &impulse_t);
+        // Get the relative velocity at the contact point
+        // between the two objects
+        PPVec3 fvr;
+        pp_vec3_sub(&rhs_fv, &lhs_fv, &fvr);
 
-        PPVec3 impulse;
-        pp_vec3_add(&impulse_n, &impulse_t, &impulse);
+        // Remove normal component to get tangent velocity
+        float rv_dot_n = pp_vec3_dot(&fvr, &manifold->n);
 
-        PPVec3 dv_lhs, dv_rhs;
-        pp_vec3_scale(&impulse, lhs->body.inv_mass, &dv_lhs);
-        pp_vec3_scale(&impulse, rhs->body.inv_mass, &dv_rhs);
+        PPVec3 normal_component;
+        pp_vec3_scale(&manifold->n, rv_dot_n, &normal_component);
 
-        pp_vec3_add(&lhs->body.vel, &dv_lhs, &lhs->body.vel);   // v_lhs ← v_lhs + Δv
-        pp_vec3_sub(&rhs->body.vel, &dv_rhs, &rhs->body.vel);   // v_rhs ← v_rhs + Δv
+        PPVec3 ftangent;
+        pp_vec3_sub(&fvr, &normal_component, &ftangent);
+
+        float ftangent_len = pp_vec3_length(&ftangent);
+        if (ftangent_len < 1e-6f)
+            return; // No tangential motion → no friction
+
+        pp_vec3_scale(&ftangent, 1.0f / ftangent_len, &ftangent); // Normalize
+
+        // --- Effective mass computation (matrix inertia version) ---
+
+        PPVec3 lhs_rt, rhs_rt;
+        pp_vec3_cross(&lhs_pcp, &ftangent, &lhs_rt);
+        pp_vec3_cross(&rhs_pcp, &ftangent, &rhs_rt);
+
+        PPVec3 lhs_i_rt, rhs_i_rt;
+        pp_mat3_mult(&lhs->inv_inertia, &lhs_rt, &lhs_i_rt);
+        pp_mat3_mult(&rhs->inv_inertia, &rhs_rt, &rhs_i_rt);
+
+        PPVec3 lhs_fangular_term, rhs_fangular_term;
+        pp_vec3_cross(&lhs_i_rt, &lhs_pcp, &lhs_fangular_term);
+        pp_vec3_cross(&rhs_i_rt, &rhs_pcp, &rhs_fangular_term);
+
+        float finv_mass_sum =
+            lhs_im +
+            rhs_im +
+            pp_vec3_dot(&lhs_fangular_term, &ftangent) +
+            pp_vec3_dot(&rhs_fangular_term, &ftangent);
+
+        if (finv_mass_sum <= 1e-6f)
+            return;
+
+        // Friction impulse scalar
+        float jt = -pp_vec3_dot(&fvr, &ftangent);
+        jt /= finv_mass_sum;
+
+        // Coulomb friction clamp
+        float jn = J;
+        float max_friction = u * jn;
+
+        if (jt >  max_friction) jt =  max_friction;
+        if (jt < -max_friction) jt = -max_friction;
+
+        PPVec3 friction_impulse;
+        pp_vec3_scale(&ftangent, jt, &friction_impulse);
+
+        // --- Apply linear impulse ---
+
+        PPVec3 temp;
+
+        pp_vec3_scale(&friction_impulse, lhs_im, &temp);
+        pp_vec3_sub(&lhs->vel, &temp, &lhs->vel);
+
+        pp_vec3_scale(&friction_impulse, rhs_im, &temp);
+        pp_vec3_add(&rhs->vel, &temp, &rhs->vel);
+
+        // --- Apply angular impulse (matrix inertia) ---
+
+        PPVec3 fang_imp;
+
+        // lhs
+        pp_vec3_cross(&lhs_pcp, &friction_impulse, &fang_imp);
+        pp_mat3_mult(&lhs->inv_inertia, &fang_imp, &fang_imp);
+        pp_vec3_sub(&lhs->a_vel, &fang_imp, &lhs->a_vel);
+
+        // rhs
+        pp_vec3_cross(&rhs_pcp, &friction_impulse, &fang_imp);
+        pp_mat3_mult(&rhs->inv_inertia, &fang_imp, &fang_imp);
+        pp_vec3_add(&rhs->a_vel, &fang_imp, &rhs->a_vel);
     }
 }
 
@@ -2021,75 +2451,15 @@ bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* cont
 
 }
 
-void pp_physics_step(float t) {
-    PPVec3 scaled_vel;
+void pp_physics_step(float t, int iterations)
+{
+    pp_move_bodies(t);
 
-    // Apply acceleration to velocity
-    for(int i = 0; i < object_count; ++i) {
-        PPBody* body = (PPBody*) &objects[i];
-
-        if(!body->is_alive) {
-            continue;
-        }
-
-        // Apply gravity to acceleration before applying acceleration
-        // to velocity
-        pp_vec3_add(&body->acc, &gravity, &body->acc);
-
-        pp_vec3_scale(&body->acc, t, &scaled_vel);
-        pp_vec3_add(&body->vel, &scaled_vel, &body->vel);
-        pp_vec3_init(&body->acc);
-
-        // Apply linear damping
-        pp_vec3_scale(&body->vel, 1.0f - body->damping, &body->vel);
-
-        if(body->lock) {
-            if((body->lock & PP_AXIS_LOCK_PITCH) == PP_AXIS_LOCK_PITCH) {
-                body->a_acc.xyz[0] = 0.0f;
-                body->a_vel.xyz[0] = 0.0f;
-            }
-
-            if((body->lock & PP_AXIS_LOCK_YAW) == PP_AXIS_LOCK_YAW) {
-                body->a_acc.xyz[1] = 0.0f;
-                body->a_vel.xyz[1] = 0.0f;
-            }
-
-            if((body->lock & PP_AXIS_LOCK_ROLL) == PP_AXIS_LOCK_ROLL) {
-                body->a_acc.xyz[2] = 0.0f;
-                body->a_vel.xyz[2] = 0.0f;
-            }
-        }
-
-        PPVec3 scaled_ang_vel; // Temporary variable to store scaled angular velocity
-        pp_vec3_scale(&body->a_acc, t, &scaled_ang_vel);
-        pp_vec3_add(&body->a_vel, &scaled_ang_vel, &body->a_vel);
-
-        // Apply angular damping if desired
-        pp_vec3_scale(&body->a_vel, 1.0f - body->a_damping, &body->a_vel);
-
-        // Reset the acceleration
-        pp_vec3_init(&body->a_acc);
-    }
-
-    // Move all spheres by their velocity
-    for(int i = 0; i < object_count; ++i) {
-        PPBody* body = (PPBody*) &objects[i];
-        if(!body->is_alive) {
-            continue;
-        }
-
-        pp_vec3_scale(&body->vel, t, &scaled_vel);
-        pp_vec3_add(&body->pos, &scaled_vel, &body->pos);
-
-        PPQuaternion q_rot;
-        pp_quat_from_angular_velocity(&body->a_vel, t, &q_rot); // Get rotation quaternion from angular velocity
-        pp_quat_multiply(&body->rot, &q_rot, &body->rot); // Combine with current rotation
-        pp_quat_normalize(&body->rot); // Normalize the quaternion
-    }
-
+    int manifold_count = 0;
+    PPCollision manifolds[PICOPHYSICS_MAX_MANIFOLDS];
 
     for(int i = 0; i < object_count; ++i) {
-        // Check collision between spheres
+        // Check collision between bodies
         PPBody* lhs_body = (PPBody*) &objects[i];
         PPSphere* lhs_sphere = PP_SPHERE(lhs_body);
         PPBox* lhs_box = PP_BOX(lhs_body);
@@ -2100,6 +2470,34 @@ void pp_physics_step(float t) {
 
         if(!lhs_body->is_alive) {
             continue;
+        }
+
+        // Solve sphere/triangle first (as we're not yet an iterative solver)
+        if(lhs_sphere) {
+            for(int j = 0; j < tri_count; ++j) {
+                const PPTriangle* tri = tris + j;
+
+                PPVec3 p, d;
+                pp_vec3_scale(&tri->n, -1.0f, &d);
+                float dist;
+                if(pp_tri_intersect(tri, &lhs_body->pos, &d, &p, &dist)) {
+                    if(dist <= lhs_sphere->radius) {
+                        PPCollision c;
+                        pp_fill_collision_info_sphere_triangle(lhs_sphere, tri, &p, lhs_sphere->radius - dist, &c);
+
+                        bool respond = true;
+                        const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
+
+                        if(cb) {
+                            respond = cb->collision_callback(lhs_sphere, tri, lhs_body->kind, tri->kind, &c, cb->user_data);
+                        }
+
+                        if(respond) {
+                            manifolds[manifold_count++] = c;
+                        }
+                    }
+                }
+            }
         }
 
         for(int j = i + 1; j < object_count; ++j) {
@@ -2129,8 +2527,7 @@ void pp_physics_step(float t) {
                     }
 
                     if (respond) {
-                        // pp_sphere_sphere_response(lhs_sphere, rhs_sphere, &c);
-                        pp_solve(&c);
+                        manifolds[manifold_count++] = c;
                     }
                 }
             } else if((lhs_sphere && rhs_box) || (rhs_sphere && lhs_box)) {
@@ -2151,38 +2548,16 @@ void pp_physics_step(float t) {
                     }
 
                     if (respond) {
-                        // pp_sphere_box_response(sphere, box, &c, t);
-                        pp_solve(&c);
+                        manifolds[manifold_count++] = c;
                     }
                 }
             }
         }
+    }
 
-        if(lhs_sphere) {
-            for(int j = 0; j < tri_count; ++j) {
-                const PPTriangle* tri = tris + j;
-
-                PPVec3 p, d;
-                pp_vec3_scale(&tri->n, -1.0f, &d);
-                float dist;
-                if(pp_tri_intersect(tri, &lhs_body->pos, &d, &p, &dist)) {
-                    if(dist <= lhs_sphere->radius) {
-                        PPCollision c;
-                        pp_fill_collision_info_sphere_triangle(lhs_sphere, tri, &p, lhs_sphere->radius - dist, &c);
-
-                        bool respond = true;
-                        const struct _PPCollisionMapEntry* cb = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
-
-                        if(cb) {
-                            respond = cb->collision_callback(lhs_sphere, tri, lhs_body->kind, tri->kind, &c, cb->user_data);
-                        }
-
-                        if(respond) {
-                            pp_solve(&c);
-                        }
-                    }
-                }
-            }
+    for (int j = 0; j < iterations; ++j) {
+        for(int i = 0; i < manifold_count; ++i) {
+            pp_solve(&manifolds[i], t);
         }
     }
 }
