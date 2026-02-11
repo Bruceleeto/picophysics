@@ -1558,6 +1558,11 @@ static void pp_solve(const PPCollision* manifold, float step) {
 
     float overlap = manifold->dist;
 
+    if (overlap < FLT_EPSILON) {
+        // Not overlapping
+        return;
+    }
+
     PPVec3 adjustment_lhs, adjustment_rhs;
 
     float vel_along_normal = 0.0f;
@@ -1565,6 +1570,11 @@ static void pp_solve(const PPCollision* manifold, float step) {
 
     PPVec3 lhs_pcp = {.xyz={0.0f, 0.0f, 0.0f}}, rhs_pcp = {.xyz={0.0f, 0.0f, 0.0f}};
     float inv_mass_sum = lhs->inv_mass + rhs->inv_mass;
+
+    if(inv_mass_sum < FLT_EPSILON) {
+        // Both bodies are static
+        return;
+    }
 
     float lhs_ratio = lhs->inv_mass / inv_mass_sum;
     float rhs_ratio = rhs->inv_mass / inv_mass_sum;
@@ -1598,14 +1608,13 @@ static void pp_solve(const PPCollision* manifold, float step) {
     vel_along_normal = pp_vec3_dot(&rel_vel, &manifold->n);
 
     if (vel_along_normal < 0) {
-        PPVec3 penetration, tangent;
+        PPVec3 penetration;
         pp_vec3_scale(&manifold->n, vel_along_normal, &penetration);
-        pp_vec3_sub(&rel_vel, &penetration, &tangent);
 
         // Moving towards each other
         float r = fmax(manifold->obj1_bounce, manifold->obj2_bounce);
 
-        const float bounce_threshold = 1.0f;
+        const float bounce_threshold = 0.1f;
         if (fabs(vel_along_normal) < bounce_threshold) {
             // If we're not moving, then don't add bounce!
             r = 0.0f;
@@ -1643,7 +1652,16 @@ static void pp_solve(const PPCollision* manifold, float step) {
         float angular_term = pp_vec3_dot(&combined_angular_term, &manifold->n);
 
         float denominator = linear_term + angular_term;
+
+        if (fabs(denominator) < 1e-6f) {
+            // Prevent divide by zero
+            return;
+        }
+
         float J = numerator / denominator;
+        if(J < 0.0f) {
+            J = 0.0f;
+        }
 
         PPVec3 impulse, ang_imp;
         pp_vec3_scale(&manifold->n, J, &impulse);
@@ -1695,71 +1713,69 @@ static void pp_solve(const PPCollision* manifold, float step) {
         pp_vec3_sub(&fvr, &normal_component, &ftangent);
 
         float ftangent_len = pp_vec3_length(&ftangent);
-        if (ftangent_len < 1e-6f)
-            return; // No tangential motion → no friction
+        if (ftangent_len >= 1e-6f) {
+            pp_vec3_scale(&ftangent, 1.0f / ftangent_len, &ftangent); // Normalize
 
-        pp_vec3_scale(&ftangent, 1.0f / ftangent_len, &ftangent); // Normalize
+            // --- Effective mass computation (matrix inertia version) ---
 
-        // --- Effective mass computation (matrix inertia version) ---
+            PPVec3 lhs_rt, rhs_rt;
+            pp_vec3_cross(&lhs_pcp, &ftangent, &lhs_rt);
+            pp_vec3_cross(&rhs_pcp, &ftangent, &rhs_rt);
 
-        PPVec3 lhs_rt, rhs_rt;
-        pp_vec3_cross(&lhs_pcp, &ftangent, &lhs_rt);
-        pp_vec3_cross(&rhs_pcp, &ftangent, &rhs_rt);
+            PPVec3 lhs_i_rt, rhs_i_rt;
+            pp_mat3_mult(&lhs->inv_inertia, &lhs_rt, &lhs_i_rt);
+            pp_mat3_mult(&rhs->inv_inertia, &rhs_rt, &rhs_i_rt);
 
-        PPVec3 lhs_i_rt, rhs_i_rt;
-        pp_mat3_mult(&lhs->inv_inertia, &lhs_rt, &lhs_i_rt);
-        pp_mat3_mult(&rhs->inv_inertia, &rhs_rt, &rhs_i_rt);
+            PPVec3 lhs_fangular_term, rhs_fangular_term;
+            pp_vec3_cross(&lhs_pcp, &lhs_i_rt, &lhs_fangular_term);
+            pp_vec3_cross(&rhs_pcp, &rhs_i_rt, &rhs_fangular_term);
 
-        PPVec3 lhs_fangular_term, rhs_fangular_term;
-        pp_vec3_cross(&lhs_i_rt, &lhs_pcp, &lhs_fangular_term);
-        pp_vec3_cross(&rhs_i_rt, &rhs_pcp, &rhs_fangular_term);
+            float finv_mass_sum =
+                lhs_im +
+                rhs_im +
+                pp_vec3_dot(&lhs_fangular_term, &ftangent) +
+                pp_vec3_dot(&rhs_fangular_term, &ftangent);
 
-        float finv_mass_sum =
-            lhs_im +
-            rhs_im +
-            pp_vec3_dot(&lhs_fangular_term, &ftangent) +
-            pp_vec3_dot(&rhs_fangular_term, &ftangent);
+            if (finv_mass_sum >= 1e-6f) {
+                // Friction impulse scalar
+                float jt = -pp_vec3_dot(&fvr, &ftangent);
+                jt /= finv_mass_sum;
 
-        if (finv_mass_sum <= 1e-6f)
-            return;
+                // Coulomb friction clamp
+                float jn = J;
+                float max_friction = u * fabsf(jn);
 
-        // Friction impulse scalar
-        float jt = -pp_vec3_dot(&fvr, &ftangent);
-        jt /= finv_mass_sum;
+                if (jt >  max_friction) jt =  max_friction;
+                if (jt < -max_friction) jt = -max_friction;
 
-        // Coulomb friction clamp
-        float jn = J;
-        float max_friction = u * jn;
+                PPVec3 friction_impulse;
+                pp_vec3_scale(&ftangent, jt, &friction_impulse);
 
-        if (jt >  max_friction) jt =  max_friction;
-        if (jt < -max_friction) jt = -max_friction;
+                // --- Apply linear impulse ---
 
-        PPVec3 friction_impulse;
-        pp_vec3_scale(&ftangent, jt, &friction_impulse);
+                PPVec3 temp;
 
-        // --- Apply linear impulse ---
+                pp_vec3_scale(&friction_impulse, lhs_im, &temp);
+                pp_vec3_sub(&lhs->vel, &temp, &lhs->vel);
 
-        PPVec3 temp;
+                pp_vec3_scale(&friction_impulse, rhs_im, &temp);
+                pp_vec3_add(&rhs->vel, &temp, &rhs->vel);
 
-        pp_vec3_scale(&friction_impulse, lhs_im, &temp);
-        pp_vec3_sub(&lhs->vel, &temp, &lhs->vel);
+                // --- Apply angular impulse (matrix inertia) ---
 
-        pp_vec3_scale(&friction_impulse, rhs_im, &temp);
-        pp_vec3_add(&rhs->vel, &temp, &rhs->vel);
+                PPVec3 fang_imp;
 
-        // --- Apply angular impulse (matrix inertia) ---
+                // lhs
+                pp_vec3_cross(&lhs_pcp, &friction_impulse, &fang_imp);
+                pp_mat3_mult(&lhs->inv_inertia, &fang_imp, &fang_imp);
+                pp_vec3_sub(&lhs->a_vel, &fang_imp, &lhs->a_vel);
 
-        PPVec3 fang_imp;
-
-        // lhs
-        pp_vec3_cross(&lhs_pcp, &friction_impulse, &fang_imp);
-        pp_mat3_mult(&lhs->inv_inertia, &fang_imp, &fang_imp);
-        pp_vec3_sub(&lhs->a_vel, &fang_imp, &lhs->a_vel);
-
-        // rhs
-        pp_vec3_cross(&rhs_pcp, &friction_impulse, &fang_imp);
-        pp_mat3_mult(&rhs->inv_inertia, &fang_imp, &fang_imp);
-        pp_vec3_add(&rhs->a_vel, &fang_imp, &rhs->a_vel);
+                // rhs
+                pp_vec3_cross(&rhs_pcp, &friction_impulse, &fang_imp);
+                pp_mat3_mult(&rhs->inv_inertia, &fang_imp, &fang_imp);
+                pp_vec3_add(&rhs->a_vel, &fang_imp, &rhs->a_vel);
+            }
+        }
     }
 }
 
