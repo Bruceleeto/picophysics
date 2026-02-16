@@ -208,7 +208,7 @@ void GameScene::on_load() {
     cars_[0].roll_body_actor = create_child<smlt::Actor>(car_mesh1);
     cars_[0].body_actor = create_child<smlt::Actor>(car_mesh2);
 
-    pp_body_set_bounce(PP_BODY(ball_.body), 0.9f);
+    pp_body_set_bounce(PP_BODY(ball_.body), 0.1f);
     pp_body_set_damping(PP_BODY(ball_.body), 0.001f);
     pp_body_set_bounce(PP_BODY(cars_[0].body), 0.1f);
     pp_body_set_bounce(PP_BODY(cars_[0].roll_body), 0.1f);
@@ -261,7 +261,7 @@ void GameScene::on_fixed_update(float step)
     pp_body_set_user_data(PP_BODY(cars_[0].roll_body), (void *) 0);
     pp_body_set_damping(PP_BODY(cars_[0].roll_body), 0.01f);
 
-    pp_physics_step(step, 1, 1);
+    pp_physics_step(step, 8, 3);
 
     // The inner ball rolls on the floor
     // The body collides with walls, balls, and cars
