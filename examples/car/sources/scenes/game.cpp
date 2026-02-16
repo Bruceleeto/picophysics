@@ -261,7 +261,7 @@ void GameScene::on_fixed_update(float step)
     pp_body_set_user_data(PP_BODY(cars_[0].roll_body), (void *) 0);
     pp_body_set_damping(PP_BODY(cars_[0].roll_body), 0.01f);
 
-    pp_physics_step(step);
+    pp_physics_step(step, 1, 1);
 
     // The inner ball rolls on the floor
     // The body collides with walls, balls, and cars

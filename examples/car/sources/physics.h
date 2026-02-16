@@ -255,7 +255,7 @@ void pp_quat_slerp(const PPQuaternion* q0, const PPQuaternion* q1, float t, PPQu
 PPQuaternion* pp_quat_assign(PPQuaternion* target, const PPQuaternion* source);
 float pp_quat_angle_between(const PPQuaternion* q0, const PPQuaternion* q1);
 
-void pp_physics_step(float t, int iterations);
+void pp_physics_step(float t, int velocity_iterations, int position_iterations);
 bool pp_physics_ray_intersect(const PPVec3* origin, const PPVec3* direction, BodyKind* ignore_kinds, const PPBody** body_hit, const PPTriangle** tri_hit, float* distance, PPVec3* intersection);
 void pp_physics_clear();
 void pp_physics_set_gravity(const PPVec3* v);
@@ -2451,7 +2451,7 @@ bool pp_sphere_box_intersect(const PPSphere* lhs, const PPBox* rhs, PPVec3* cont
 
 }
 
-void pp_physics_step(float t, int iterations)
+void pp_physics_step(float t, int velocity_iterations, int position_iterations)
 {
     pp_move_bodies(t);
 
@@ -2555,7 +2555,7 @@ void pp_physics_step(float t, int iterations)
         }
     }
 
-    for (int j = 0; j < iterations; ++j) {
+    for (int j = 0; j < velocity_iterations; ++j) {
         for(int i = 0; i < manifold_count; ++i) {
             pp_solve(&manifolds[i], t);
         }
