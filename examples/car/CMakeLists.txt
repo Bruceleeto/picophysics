@@ -94,7 +94,7 @@ ELSE()
     add_executable(example ${SOURCES})
 ENDIF()
 
-target_include_directories(example PRIVATE ${CMAKE_SOURCE_DIR}/..)
+target_include_directories(example PRIVATE ${CMAKE_SOURCE_DIR}/../..)
 
 if(FLTO_SUPPORTED)
     message(STATUS "IPO / LTO enabled")

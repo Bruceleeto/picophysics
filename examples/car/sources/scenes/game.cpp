@@ -2,7 +2,7 @@
 #include "game.h"
 
 #define PICOPHYSICS_IMPLEMENTATION
-#include "../physics.h"
+#include <picophysics.h>
 
 #define CAR_BODY_KIND 1
 #define CAR_INNER_KIND 2
@@ -178,8 +178,8 @@ void GameScene::on_load() {
 
     PPVec3 pos;
     pp_vec3_set(&pos, 0, 2, 0);
-    ball_.body = pp_physics_create_sphere(0.5f, &pos, 0.01f, BALL_KIND);
-    pp_body_set_friction(PP_BODY(ball_.body), 0.9f);
+    ball_.body = pp_physics_create_sphere(0.5f, &pos, 0.1f, BALL_KIND);
+    // pp_body_set_friction(PP_BODY(ball_.body), 0.9f);
 
     pp_vec3_set(&pos, 1.0f, 4, 0);
     cars_[0].body = pp_physics_create_box(0.5f, 0.5f, 1.0f, &pos, 1.0, CAR_BODY_KIND);
@@ -208,10 +208,10 @@ void GameScene::on_load() {
     cars_[0].roll_body_actor = create_child<smlt::Actor>(car_mesh1);
     cars_[0].body_actor = create_child<smlt::Actor>(car_mesh2);
 
-    pp_body_set_bounce(PP_BODY(ball_.body), 0.9f);
-    pp_body_set_damping(PP_BODY(ball_.body), 0.001f);
-    pp_body_set_bounce(PP_BODY(cars_[0].body), 0.1f);
-    pp_body_set_bounce(PP_BODY(cars_[0].roll_body), 0.1f);
+    // pp_body_set_bounce(PP_BODY(ball_.body), 0.1f);
+    // pp_body_set_damping(PP_BODY(ball_.body), 0.001f);
+    // pp_body_set_bounce(PP_BODY(cars_[0].body), 0.1f);
+    // pp_body_set_bounce(PP_BODY(cars_[0].roll_body), 0.1f);
 
     define_stadium();
 
@@ -261,7 +261,7 @@ void GameScene::on_fixed_update(float step)
     pp_body_set_user_data(PP_BODY(cars_[0].roll_body), (void *) 0);
     pp_body_set_damping(PP_BODY(cars_[0].roll_body), 0.01f);
 
-    pp_physics_step(step);
+    pp_physics_step(step, 8, 3);
 
     // The inner ball rolls on the floor
     // The body collides with walls, balls, and cars

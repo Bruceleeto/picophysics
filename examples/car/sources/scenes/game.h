@@ -2,8 +2,7 @@
 
 #include <simulant/simulant.h>
 
-#include "../physics.h"
-
+#include <picophysics.h>
 
 typedef struct _Car {
     PPBox *body;

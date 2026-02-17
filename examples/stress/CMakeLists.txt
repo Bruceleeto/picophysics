@@ -94,7 +94,8 @@ ELSE()
     add_executable(intersections ${SOURCES})
 ENDIF()
 
-target_include_directories(intersections PRIVATE ${CMAKE_SOURCE_DIR}/..)
+message(${CMAKE_SOURCE_DIR}/../..)
+include_directories(intersections ${CMAKE_SOURCE_DIR}/../..)
 
 if(FLTO_SUPPORTED)
     message(STATUS "IPO / LTO enabled")
