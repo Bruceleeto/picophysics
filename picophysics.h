@@ -2627,10 +2627,10 @@ bool pp_sphere_box_intersect(
     if (n) {
         PPVec3 normal_local;
         if (dist > 1e-6f) {
-            pp_vec3_scale(&delta_local, 1.0f / dist, &normal_local);
+            pp_vec3_scale(&delta_local, -1.0f / dist, &normal_local);
         } else {
             // Sphere center is inside box, pick arbitrary normal (e.g., x axis)
-            pp_vec3_set(&normal_local, 1.0f, 0.0f, 0.0f);
+            pp_vec3_set(&normal_local, -1.0f, 0.0f, 0.0f);
         }
         // Rotate normal to world space
         pp_quat_transform(&rhs->body.rot, &normal_local, n);
