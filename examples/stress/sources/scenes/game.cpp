@@ -2,7 +2,7 @@
 #include "game.h"
 
 #define PICOPHYSICS_IMPLEMENTATION
-#include "../physics.h"
+#include <picophysics.h>
 
 #define BOX_KIND 1
 #define BALL_KIND 2
@@ -89,13 +89,20 @@ void GameScene::on_load() {
 
 void GameScene::on_fixed_update(float step)
 {
-    pp_physics_step(step, 8);
+    pp_physics_step(step, 8, 3);
 }
 
 void GameScene::on_update(float dt) {
     if (input->axis_was_pressed("Sphere")) {
         Shape *s = &shapes_[shape_count_++];
-        s->body = PP_BODY(pp_physics_create_sphere(0.5f, NULL, 1.0f, BALL_KIND));
+
+        PPVec3 pos = {
+            smlt::RandomGenerator::instance().float_in_range(-2.0f, 2.0f),
+            1.0f,
+            smlt::RandomGenerator::instance().float_in_range(-2.0f, 2.0f),
+        };
+
+        s->body = PP_BODY(pp_physics_create_sphere(0.5f, &pos, 1.0f, BALL_KIND));
 
         auto m = assets->find_mesh("Sphere");
         assert(m);

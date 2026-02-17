@@ -399,8 +399,14 @@ static PPObject objects[PICOPHYSICS_MAX_OBJECTS];
 static int object_count = 0;
 static int dead_object_count = 0;
 
+/* This body is used to represent the entire tri-mesh. It's static,
+ * has a mass of zero and an inv_mass of zero and so it should never change
+ * position. The only thing to be careful of is that the position and rotation
+ * is totally irrelevant for the simulation! Always take this into account when
+ * working on the collision response code. */
 static PPBody trimesh_body = {
     .type = PP_OBJECT_TYPE_TRIANGLE,
+    .is_alive = true,
 };
 
 static PPTriangle tris[PICOPHYSICS_MAX_TRIANGLES];
@@ -802,7 +808,7 @@ bool pp_physics_ray_intersect(const PPVec3 *origin,
     const PPBody *closest_body = NULL;
     PPVec3 closest_intersection;
 
-    for (int i = 0; i < pp_physics_triangle_count(); ++i) {
+    for (size_t i = 0; i < pp_physics_triangle_count(); ++i) {
         const PPTriangle *t = pp_physics_triangle_at(i);
 
         PPVec3 hit;
@@ -820,7 +826,7 @@ bool pp_physics_ray_intersect(const PPVec3 *origin,
         }
     }
 
-    for (int i = 0; i < pp_physics_body_total_count(); ++i) {
+    for (size_t i = 0; i < pp_physics_body_total_count(); ++i) {
         const PPBody *body = pp_physics_body_at(i);
         if (!body->is_alive) {
             continue;
@@ -1450,15 +1456,15 @@ void pp_fill_collision_info_sphere_sphere(const PPSphere *lhs,
                                           float dist,
                                           PPCollision *c)
 {
+    float total_radius = lhs->radius + rhs->radius;
     pp_vec3_sub(&rhs->body.pos, &lhs->body.pos, &c->n);
-    c->dist = dist;
+    c->dist = dist - total_radius;
     if (dist > 0) {
         c->n.xyz[0] /= dist;
         c->n.xyz[1] /= dist;
         c->n.xyz[2] /= dist;
     }
 
-    float total_radius = lhs->radius + rhs->radius;
     float wr1 = lhs->radius / total_radius;
     float wr2 = rhs->radius / total_radius;
 
@@ -1643,7 +1649,7 @@ static void pp_integrate_forces(float t)
 
         // Apply linear damping
         float damp = expf(-body->damping * t);
-        pp_vec3_scale(&body->vel, 1.0f - damp, &body->vel);
+        pp_vec3_scale(&body->vel, damp, &body->vel);
 
         if (body->lock) {
             if ((body->lock & PP_AXIS_LOCK_PITCH) == PP_AXIS_LOCK_PITCH) {
@@ -1668,7 +1674,7 @@ static void pp_integrate_forces(float t)
 
         // Apply angular damping if desired
         float a_damp = expf(-body->a_damping * t);
-        pp_vec3_scale(&body->a_vel, 1.0f - a_damp, &body->a_vel);
+        pp_vec3_scale(&body->a_vel, a_damp, &body->a_vel);
 
         // Reset the acceleration
         pp_vec3_init(&body->a_acc);
@@ -1799,10 +1805,6 @@ static void pp_solve_velocities(const PPCollision *manifold)
 
     // Friction!!!
     float f = manifold->obj1_friction * manifold->obj2_friction;
-
-    float u = f; // Friction coefficient
-    float lhs_im = lhs->inv_mass;
-    float rhs_im = rhs->inv_mass;
     PPVec3 lhs_fv, rhs_fv;
 
     // Calculate velocities at the contact point
@@ -2186,14 +2188,14 @@ bool pp_gjk_support(const PPBody *b1, const PPBody *b2, const PPVec3 *direction,
         pp_vec3_sub(&out->a, &out->b, &out->point);
         return true;
     } else if (b1->type == PP_OBJECT_TYPE_BOX && b2->type == PP_OBJECT_TYPE_SPHERE) {
-        PPVec3 reverse, first, second;
+        PPVec3 reverse;
         pp_vec3_neg(direction, &reverse);
         pp_find_furthest_point_box(PP_BOX(b1), direction, &out->a);
         pp_find_furthest_point_sphere(PP_SPHERE(b2), &reverse, &out->b);
         pp_vec3_sub(&out->a, &out->b, &out->point);
         return true;
     } else if (b1->type == PP_OBJECT_TYPE_SPHERE && b2->type == PP_OBJECT_TYPE_BOX) {
-        PPVec3 reverse, first, second;
+        PPVec3 reverse;
         pp_vec3_neg(direction, &reverse);
         pp_find_furthest_point_sphere(PP_SPHERE(b1), direction, &out->a);
         pp_find_furthest_point_box(PP_BOX(b2), &reverse, &out->b);
@@ -2358,7 +2360,7 @@ void pp_polytope_erase_face(PPPolytope *polytope, size_t face_index)
 void pp_polytope_write(const PPPolytope *polytope, const char *filename)
 {
     FILE *out = fopen(filename, "wt");
-    for (int i = 0; i < polytope->point_count; ++i) {
+    for (size_t i = 0; i < polytope->point_count; ++i) {
         fprintf(out,
                 "v %f %f %f\n",
                 polytope->points[i].point.x,
@@ -2366,7 +2368,7 @@ void pp_polytope_write(const PPPolytope *polytope, const char *filename)
                 polytope->points[i].point.z);
     }
 
-    for (int i = 0; i < polytope->face_count; ++i) {
+    for (size_t i = 0; i < polytope->face_count; ++i) {
         fprintf(out,
                 "f %d %d %d\n",
                 polytope->faces[i].a + 1,
@@ -2405,7 +2407,7 @@ int pp_find_min_face(const PPPolytope *polytope)
     int min_face = 0;
     float min_dot = FLT_MAX;
 
-    for (int i = 0; i < polytope->face_count; i++) {
+    for (size_t i = 0; i < polytope->face_count; i++) {
         const PPPolytopeFace *face = &polytope->faces[i];
         float dot = face->d;
         if (dot < min_dot) {
@@ -2501,7 +2503,6 @@ bool pp_epa(PPSimplex *simplex,
                 break;
             }
 
-            size_t new_face_index = polytope.face_count;
             size_t new_point_index = polytope.point_count;
 
             memcpy(&polytope.points[polytope.point_count++], &support, sizeof(PPSupportPoint));
@@ -2666,25 +2667,20 @@ static void pp_solve_positions(const PPCollision *manifold)
     PPBody *lhs = PP_BODY(manifold->obj1);
     PPBody *rhs = PP_BODY(manifold->obj2);
 
-    if (!lhs->is_alive || !rhs->is_alive)
+    if (!lhs->is_alive || !rhs->is_alive) {
         return;
+    }
 
     float inv_mass_sum = lhs->inv_mass + rhs->inv_mass;
-    if (inv_mass_sum < 1e-8f)
+    if (inv_mass_sum < 1e-8f) {
         return; // both static
+    }
 
     // Recompute penetration depth.
-    // Assumes manifold->n is still valid contact normal.
     PPVec3 delta;
     pp_vec3_sub(&rhs->pos, &lhs->pos, &delta);
 
-    float separation = pp_vec3_dot(&delta, &manifold->n);
-
-    // If separation is positive, bodies are apart.
     float penetration = manifold->dist;
-    // If your dist is already penetration depth, you can use it directly.
-    // Otherwise compute:
-    // float penetration = manifold->contact_distance - separation;
 
     if (penetration <= 0.0f)
         return;
