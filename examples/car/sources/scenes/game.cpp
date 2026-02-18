@@ -142,14 +142,14 @@ bool ground_check(
 bool ball_car_collision(
     const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c, const void *)
 {
-    // PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
-    // PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
-    // PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
+    PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
+    PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
+    PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
 
-    // PPVec3 vel;
-    // pp_body_get_velocity_at_position(PP_BODY(car_ball_body), &c->p, &vel);
-    // pp_body_add_force(PP_BODY(ball), vel.x, vel.y - 5, vel.z);
-    return true;
+    PPVec3 vel;
+    pp_body_get_velocity_at_position(PP_BODY(car_ball_body), &c->p, &vel);
+    pp_body_add_force(PP_BODY(ball), vel.x, vel.y, vel.z);
+    return false;
 }
 
 void rotate_to_direction(PPBox *sphere, const PPVec3 *target_forward, float dt)
@@ -258,10 +258,24 @@ void GameScene::on_load() {
 
 void GameScene::on_fixed_update(float step)
 {
+    // Set that we're not grounded
     pp_body_set_user_data(PP_BODY(cars_[0].roll_body), (void *) 0);
-    pp_body_set_damping(PP_BODY(cars_[0].roll_body), 0.01f);
-
     pp_physics_step(step, 8, 3);
+
+    // Try to zero out sideways forces to prevent the car drifting
+
+    PPVec3 forward, right;
+    pp_body_get_forward(PP_BODY(cars_[0].body), &forward);
+    pp_body_get_right(PP_BODY(cars_[0].body), &right);
+
+    PPVec3 roll_velocity;
+    pp_body_get_velocity(PP_BODY(cars_[0].roll_body), &roll_velocity);
+
+    float side_vel = pp_vec3_dot(&roll_velocity, &right);
+
+    PPVec3 force;
+    pp_vec3_scale(&right, -side_vel * pp_body_get_mass(PP_BODY(cars_[0].roll_body)), &force);
+    pp_body_add_force(PP_BODY(cars_[0].roll_body), force.x, force.y, force.z);
 
     // The inner ball rolls on the floor
     // The body collides with walls, balls, and cars

@@ -331,7 +331,11 @@ void pp_body_add_angular_force(PPBody *s, float x, float y, float z);
 void pp_body_lock_axis(PPBody *s, PPAxisLock lock);
 void pp_body_set_angular_damping(PPBody *s, float d);
 void pp_body_set_damping(PPBody *s, float d);
+
 void pp_body_get_forward(PPBody *s, PPVec3 *f);
+void pp_body_get_right(PPBody *s, PPVec3 *r);
+void pp_body_get_up(PPBody *s, PPVec3 *u);
+
 void pp_body_set_position(PPBody *s, float x, float y, float z);
 void pp_body_get_position(PPBody *s, PPVec3 *pos);
 void pp_body_set_rotation(PPBody *s, float x, float y, float z, float w);
@@ -342,6 +346,8 @@ void *pp_body_get_user_data(const PPBody *s);
 void pp_body_set_kind(PPBody *b, BodyKind kind);
 BodyKind pp_body_get_kind(const PPBody *b);
 bool pp_body_set_friction(PPBody *s, float f);
+void pp_body_set_mass(PPBody* b, float mass);
+float pp_body_get_mass(const PPBody* b);
 void pp_body_get_velocity(const PPBody *s, PPVec3 *vel);
 void pp_body_get_velocity_at_position(const PPBody *b, const PPVec3 *p, PPVec3 *ret);
 void pp_body_set_angular_velocity(PPBody *s, float x, float y, float z);
@@ -673,6 +679,30 @@ void pp_quat_forward(const PPQuaternion *q, PPVec3 *out)
     out->x = 2.0f * (x * z + w * y);
     out->y = 2.0f * (y * z - w * x);
     out->z = 1.0f - 2.0f * (x * x + y * y);
+}
+
+void pp_quat_up(const PPQuaternion *q, PPVec3 *out)
+{
+    float x = q->x;
+    float y = q->y;
+    float z = q->z;
+    float w = q->w;
+
+    out->x = 2.0f * (x * y - w * z);
+    out->y = 1.0f - 2.0f * (x * x + z * z);
+    out->z = 2.0f * (y * z + w * x);
+}
+
+void pp_quat_right(const PPQuaternion *q, PPVec3 *out)
+{
+    float x = q->x;
+    float y = q->y;
+    float z = q->z;
+    float w = q->w;
+
+    out->x = 1.0f - 2.0f * (y * y + z * z);
+    out->y = 2.0f * (x * y + w * z);
+    out->z = 2.0f * (x * z - w * y);
 }
 
 void pp_quat_between(const PPVec3 *v0, const PPVec3 *v1, PPQuaternion *result)
@@ -1115,9 +1145,27 @@ void pp_body_set_damping(PPBody *s, float d)
     s->damping = d;
 }
 
+void pp_body_set_mass(PPBody* b, float mass) {
+    b->mass = mass;
+}
+
+float pp_body_get_mass(const PPBody* b) {
+    return b->mass;
+}
+
 void pp_body_get_forward(PPBody *s, PPVec3 *f)
 {
     pp_quat_forward(&s->rot, f);
+}
+
+void pp_body_get_up(PPBody *s, PPVec3 *u)
+{
+    pp_quat_up(&s->rot, u);
+}
+
+void pp_body_get_right(PPBody *s, PPVec3 *r)
+{
+    pp_quat_right(&s->rot, r);
 }
 
 float pp_box_get_width(const PPBox *b)
