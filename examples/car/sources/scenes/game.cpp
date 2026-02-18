@@ -139,6 +139,12 @@ bool ground_check(
     return true;
 }
 
+bool ball_wall_collision(
+    const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c, const void *)
+{
+    return true;
+}
+
 bool ball_car_collision(
     const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c, const void *)
 {
@@ -147,7 +153,7 @@ bool ball_car_collision(
     PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
 
     PPVec3 vel;
-    pp_body_get_velocity_at_position(PP_BODY(car_ball_body), &c->p, &vel);
+    pp_vec3_scale(&c->n, -10.0f, &vel);
     pp_body_add_force(PP_BODY(ball), vel.x, vel.y, vel.z);
     return false;
 }
@@ -171,6 +177,7 @@ void GameScene::on_load() {
     pp_physics_collision_map_add(CAR_BODY_KIND, ENV_FLOOR_KIND, NULL, &dont_collide);
     pp_physics_collision_map_add(CAR_INNER_KIND, ENV_FLOOR_KIND, NULL, &ground_check);
     pp_physics_collision_map_add(CAR_BODY_KIND, BALL_KIND, NULL, &ball_car_collision);
+    pp_physics_collision_map_add(BALL_KIND, ENV_WALL_KIND, NULL, &ball_wall_collision);
 
     auto car_mesh2 = assets->load_mesh("assets/car/sedan-sports.obj");
     float cs = 1.0f / car_mesh2->aabb().max_dimension();
@@ -178,14 +185,14 @@ void GameScene::on_load() {
 
     PPVec3 pos;
     pp_vec3_set(&pos, 0, 2, 0);
-    ball_.body = pp_physics_create_sphere(0.5f, &pos, 0.1f, BALL_KIND);
+    ball_.body = pp_physics_create_sphere(0.5f, &pos, 0.025f, BALL_KIND);
     // pp_body_set_friction(PP_BODY(ball_.body), 0.9f);
 
     pp_vec3_set(&pos, 1.0f, 4, 0);
-    cars_[0].body = pp_physics_create_box(0.5f, 0.5f, 1.0f, &pos, 1.0, CAR_BODY_KIND);
-    cars_[0].roll_body = pp_physics_create_sphere(0.5f,
+    cars_[0].body = pp_physics_create_box(0.5f, 0.5f, 1.0f, &pos, 0.25f, CAR_BODY_KIND);
+    cars_[0].roll_body = pp_physics_create_sphere(car_mesh2->aabb().height() / 2,
                                                   &pos,
-                                                  car_mesh2->aabb().height() / 2,
+                                                  0.5f,
                                                   CAR_INNER_KIND);
     pp_body_set_user_data(PP_BODY(cars_[0].body), cars_[0].roll_body);
 
@@ -208,16 +215,20 @@ void GameScene::on_load() {
     cars_[0].roll_body_actor = create_child<smlt::Actor>(car_mesh1);
     cars_[0].body_actor = create_child<smlt::Actor>(car_mesh2);
 
-    // pp_body_set_bounce(PP_BODY(ball_.body), 0.1f);
-    // pp_body_set_damping(PP_BODY(ball_.body), 0.001f);
-    // pp_body_set_bounce(PP_BODY(cars_[0].body), 0.1f);
-    // pp_body_set_bounce(PP_BODY(cars_[0].roll_body), 0.1f);
+    pp_body_set_angular_damping(PP_BODY(ball_.body), 0.2f);
+    pp_body_set_bounce(PP_BODY(ball_.body), 0.3f);
+    pp_body_set_damping(PP_BODY(ball_.body), 0.1f);
+    pp_body_set_bounce(PP_BODY(cars_[0].body), 0.1f);
+    pp_body_set_bounce(PP_BODY(cars_[0].roll_body), 0.1f);
+    pp_body_set_damping(PP_BODY(cars_[0].roll_body), 0.75f);
+    pp_body_limit_velocity(PP_BODY(cars_[0].roll_body), 10.0f);
+    pp_body_limit_velocity(PP_BODY(ball_.body), 8.0f);
 
     define_stadium();
 
     PPVec3 grv;
     pp_vec3_init(&grv);
-    grv.xyz[1] = -9.8f;
+    grv.xyz[1] = -3.0f;
     pp_physics_set_gravity(&grv);
 
     camera_ = create_child<smlt::Camera3D>();
@@ -340,7 +351,7 @@ void GameScene::on_update(float dt) {
 
     camera_->transform->look_at(cars_[0].body_actor->transform->position(), smlt::Vec3::up());
     camera_->transform->set_position(cars_[0].body_actor->transform->position()
-                                     + smlt::Vec3(0, 15, 10));
+                                     + smlt::Vec3(0, 10, 10));
 }
 
 void GameScene::on_activate() {

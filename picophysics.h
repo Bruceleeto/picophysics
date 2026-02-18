@@ -1296,7 +1296,7 @@ static void pp_body_init(PPBody *body, const PPVec3 *pos, float mass, BodyKind k
     body->kind = kind;
     body->mass = mass;
     body->inv_mass = 1.0f / mass;
-    body->friction = 0.3f;
+    body->friction = 0.75f;
     body->damping = 0.01f;
     body->a_damping = 0.02f;
     body->vel_limit = 0.0f;
