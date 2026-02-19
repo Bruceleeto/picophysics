@@ -1295,7 +1295,7 @@ static void pp_body_init(PPBody *body, const PPVec3 *pos, float mass, BodyKind k
 
     body->kind = kind;
     body->mass = mass;
-    body->inv_mass = 1.0f / mass;
+    body->inv_mass = (mass == 0.0f) ? 0.0f : 1.0f / mass;
     body->friction = 0.75f;
     body->damping = 0.01f;
     body->a_damping = 0.02f;
@@ -1308,10 +1308,16 @@ PPSphere *pp_sphere_init(PPSphere *s, float radius, const PPVec3 *pos, float mas
 {
     s->radius = radius;
     s->body.type = PP_OBJECT_TYPE_SPHERE;
-    s->body.inertia.m[0] = (2.0f / 5.0f) * mass * radius * radius;
-    s->body.inertia.m[4] = s->body.inertia.m[0];
-    s->body.inertia.m[8] = s->body.inertia.m[0];
-    pp_mat3_inverse(&s->body.inertia, &s->body.inv_inertia);
+    if (mass > 0.0f) {
+        s->body.inertia.m[0] = (2.0f / 5.0f) * mass * radius * radius;
+        s->body.inertia.m[4] = s->body.inertia.m[0];
+        s->body.inertia.m[8] = s->body.inertia.m[0];
+        pp_mat3_inverse(&s->body.inertia, &s->body.inv_inertia);
+    } else {
+        // Zero-mass (kinematic) body - no inertia
+        memset(s->body.inertia.m, 0, sizeof(s->body.inertia.m));
+        memset(s->body.inv_inertia.m, 0, sizeof(s->body.inv_inertia.m));
+    }
     pp_body_init(&s->body, pos, mass, kind);
     return s;
 }
@@ -1326,12 +1332,18 @@ PPBox *pp_box_init(
     float d2 = depth * depth;
     const float oot = 1.0f / 12.0f;
 
-    memset(s->body.inertia.m, 0, sizeof(s->body.inertia.m));
-    s->body.inertia.m[0] = oot * mass * (h2 + w2);
-    s->body.inertia.m[4] = oot * mass * (d2 + h2);
-    s->body.inertia.m[8] = oot * mass * (d2 + w2);
-
-    pp_mat3_inverse(&s->body.inertia, &s->body.inv_inertia);
+    if (mass > 0.0f) {
+        memset(s->body.inertia.m, 0, sizeof(s->body.inertia.m));
+        s->body.inertia.m[0] = oot * mass * (h2 + w2);
+        s->body.inertia.m[4] = oot * mass * (d2 + h2);
+        s->body.inertia.m[8] = oot * mass * (d2 + w2);
+        pp_mat3_inverse(&s->body.inertia, &s->body.inv_inertia);
+    } else {
+        // Zero-mass (kinematic) body - no inertia
+        memset(s->body.inertia.m, 0, sizeof(s->body.inertia.m));
+        memset(s->body.inv_inertia.m, 0, sizeof(s->body.inv_inertia.m));
+    }
+    
     pp_body_init(&s->body, pos, mass, kind);
 
     pp_vec3_set(&s->whd, width, height, depth);
@@ -1765,13 +1777,8 @@ static void pp_solve_velocities(const PPCollision *manifold)
 
     // Position (CoM) to contact point (r_a/r_b). Don't set this
     // if the inv_mass is zero and then it has no effect later on
-    if (lhs->inv_mass > 0.0f) {
-        pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_pcp);
-    }
-
-    if (rhs->inv_mass > 0.0f) {
-        pp_vec3_sub(&manifold->p, &rhs->pos, &rhs_pcp);
-    }
+    pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_pcp);
+    pp_vec3_sub(&manifold->p, &rhs->pos, &rhs_pcp);
 
     // Velocities at contact point
     PPVec3 lhs_vel, rhs_vel, rel_vel;
@@ -1779,6 +1786,14 @@ static void pp_solve_velocities(const PPCollision *manifold)
     pp_vec3_cross(&rhs->a_vel, &rhs_pcp, &rhs_vel);
     pp_vec3_add(&lhs_vel, &lhs->vel, &lhs_vel);
     pp_vec3_add(&rhs_vel, &rhs->vel, &rhs_vel);
+
+    if (lhs->inv_mass == 0.0f) {
+        pp_vec3_init(&lhs_vel);
+    }
+
+    if (rhs->inv_mass == 0.0f) {
+        pp_vec3_init(&rhs_vel);
+    }
 
     // Relative velocity at contact point
     pp_vec3_sub(&rhs_vel, &lhs_vel, &rel_vel); // v_rhs – v_lhs

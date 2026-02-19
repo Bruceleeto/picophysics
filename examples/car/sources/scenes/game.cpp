@@ -143,14 +143,14 @@ bool ball_wall_collision(
 bool ball_car_collision(
     const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c, const void *)
 {
-    PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
-    PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
-    PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
+    // PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
+    // PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
+    // PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
 
-    PPVec3 vel;
-    pp_vec3_scale(&c->n, -10.0f, &vel);
-    pp_body_add_force(PP_BODY(ball), vel.x, vel.y, vel.z);
-    return false;
+    // PPVec3 vel;
+    // pp_vec3_scale(&c->n, -10.0f, &vel);
+    // pp_body_add_force(PP_BODY(ball), vel.x, vel.y, vel.z);
+    return true;
 }
 
 void rotate_to_direction(PPBox *sphere, const PPVec3 *target_forward, float dt)
@@ -184,7 +184,7 @@ void GameScene::on_load() {
     // pp_body_set_friction(PP_BODY(ball_.body), 0.9f);
 
     pp_vec3_set(&pos, 1.0f, 4, 0);
-    cars_[0].body = pp_physics_create_box(0.5f, 0.5f, 1.0f, &pos, 0.25f, CAR_BODY_KIND);
+    cars_[0].body = pp_physics_create_box(0.5f, 0.5f, 1.0f, &pos, 0.5f, CAR_BODY_KIND);
     cars_[0].roll_body = pp_physics_create_sphere(car_mesh2->aabb().height() / 2,
                                                   &pos,
                                                   0.5f,
@@ -210,14 +210,14 @@ void GameScene::on_load() {
     cars_[0].roll_body_actor = create_child<smlt::Actor>(car_mesh1);
     cars_[0].body_actor = create_child<smlt::Actor>(car_mesh2);
 
-    pp_body_set_angular_damping(PP_BODY(ball_.body), 0.2f);
-    pp_body_set_bounce(PP_BODY(ball_.body), 0.3f);
-    pp_body_set_damping(PP_BODY(ball_.body), 0.1f);
+    // pp_body_set_angular_damping(PP_BODY(ball_.body), 0.2f);
+    pp_body_set_bounce(PP_BODY(ball_.body), 0.7f);
+    // pp_body_set_damping(PP_BODY(ball_.body), 0.1f);
     pp_body_set_bounce(PP_BODY(cars_[0].body), 0.1f);
     pp_body_set_bounce(PP_BODY(cars_[0].roll_body), 0.1f);
-    pp_body_set_damping(PP_BODY(cars_[0].roll_body), 0.75f);
-    pp_body_limit_velocity(PP_BODY(cars_[0].roll_body), 10.0f);
-    pp_body_limit_velocity(PP_BODY(ball_.body), 8.0f);
+    pp_body_set_damping(PP_BODY(cars_[0].roll_body), 0.1f);
+    pp_body_limit_velocity(PP_BODY(cars_[0].roll_body), 12.0f);
+    pp_body_limit_velocity(PP_BODY(ball_.body), 10.0f);
 
     define_stadium();
 
