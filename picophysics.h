@@ -2781,6 +2781,14 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
             for (int j = 0; j < tri_count; ++j) {
                 const PPTriangle *tri = tris + j;
 
+                const struct _PPCollisionMapEntry *cb
+                    = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
+
+                if(cb && !cb->collision_callback) {
+                    // Explicit ignore - we don't even do the intersection here
+                    continue;
+                }
+
                 PPVec3 p, d;
                 pp_vec3_scale(&tri->n, -1.0f, &d);
                 float dist;
@@ -2794,8 +2802,6 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                                                                &c);
 
                         bool respond = true;
-                        const struct _PPCollisionMapEntry *cb
-                            = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
 
                         if (cb) {
                             respond = cb->collision_callback(lhs_sphere,
@@ -2829,14 +2835,19 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
 
             if (lhs_sphere && rhs_sphere) {
                 // Sphere vs Sphere
+                const struct _PPCollisionMapEntry *cb
+                    = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
+                if(cb && !cb->collision_callback) {
+                    continue;
+                }
+
                 float dist = pp_vec3_dist(&lhs_sphere->body.pos, &rhs_sphere->body.pos);
                 if (dist <= (lhs_sphere->radius + rhs_sphere->radius)) {
                     PPCollision c;
                     pp_fill_collision_info_sphere_sphere(lhs_sphere, rhs_sphere, dist, &c);
 
                     bool respond = true;
-                    const struct _PPCollisionMapEntry *cb
-                        = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
+
                     if (cb) {
                         respond = cb->collision_callback(lhs_sphere,
                                                          rhs_sphere,
@@ -2857,13 +2868,19 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                 PPBox *box = (lhs_box) ? lhs_box : rhs_box;
                 PPVec3 contact, n;
                 float d;
+
+                const struct _PPCollisionMapEntry *cb
+                    = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
+
+                if(cb && !cb->collision_callback) {
+                    continue;
+                }
+
                 if (pp_sphere_box_intersect(sphere, box, &contact, &n, &d)) {
                     PPCollision c;
                     pp_fill_collision_info_sphere_box(sphere, box, &contact, &n, &c, d);
 
                     bool respond = true;
-                    const struct _PPCollisionMapEntry *cb
-                        = pp_physics_collision_map_search(lhs_body->kind, rhs_body->kind);
                     if (cb) {
                         respond = cb->collision_callback(sphere,
                                                          box,

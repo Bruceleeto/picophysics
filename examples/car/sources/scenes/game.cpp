@@ -122,11 +122,6 @@ void define_stadium()
     pp_physics_create_triangle(&v1, &v3, &v4, ENV_WALL_KIND);
 }
 
-bool dont_collide(const void *, const void *, BodyKind, BodyKind, const PPCollision *, const void *)
-{
-    return false;
-}
-
 bool ground_check(
     const void *lhs, const void *rhs, BodyKind k0, BodyKind, const PPCollision *, const void *)
 {
@@ -172,9 +167,9 @@ void rotate_to_direction(PPBox *sphere, const PPVec3 *target_forward, float dt)
 }
 
 void GameScene::on_load() {
-    pp_physics_collision_map_add(CAR_BODY_KIND, CAR_INNER_KIND, NULL, &dont_collide);
-    pp_physics_collision_map_add(CAR_INNER_KIND, BALL_KIND, NULL, &dont_collide);
-    pp_physics_collision_map_add(CAR_BODY_KIND, ENV_FLOOR_KIND, NULL, &dont_collide);
+    pp_physics_collision_map_add(CAR_BODY_KIND, CAR_INNER_KIND, NULL, NULL);
+    pp_physics_collision_map_add(CAR_INNER_KIND, BALL_KIND, NULL, NULL);
+    pp_physics_collision_map_add(CAR_BODY_KIND, ENV_FLOOR_KIND, NULL, NULL);
     pp_physics_collision_map_add(CAR_INNER_KIND, ENV_FLOOR_KIND, NULL, &ground_check);
     pp_physics_collision_map_add(CAR_BODY_KIND, BALL_KIND, NULL, &ball_car_collision);
     pp_physics_collision_map_add(BALL_KIND, ENV_WALL_KIND, NULL, &ball_wall_collision);
