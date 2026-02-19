@@ -327,6 +327,7 @@ size_t pp_physics_body_count();
 size_t pp_physics_body_total_count();
 bool pp_body_set_bounce(PPBody *s, float b);
 void pp_body_add_force(PPBody *s, float x, float y, float z);
+void pp_body_add_force_at_position(PPBody *b, const PPVec3 *world_pos, const PPVec3 *force);
 void pp_body_add_angular_force(PPBody *s, float x, float y, float z);
 void pp_body_lock_axis(PPBody *s, PPAxisLock lock);
 void pp_body_set_angular_damping(PPBody *s, float d);
@@ -1452,6 +1453,23 @@ void pp_body_add_angular_force(PPBody *s, float tx, float ty, float tz)
     PPVec3 ang_acc;
     pp_vec3_scale(&torque, 1.0f / I, &ang_acc);
     pp_vec3_add(&s->a_acc, &ang_acc, &s->a_acc);
+}
+
+void pp_body_add_force_at_position(PPBody *b, const PPVec3 *world_pos, const PPVec3 *force)
+{
+    // Apply linear force
+    pp_body_add_force(b, force->x, force->y, force->z);
+
+    // Calculate torque from offset position
+    // torque = (position - center_of_mass) × force
+    PPVec3 rel_pos;
+    pp_vec3_sub(world_pos, &b->pos, &rel_pos);
+
+    PPVec3 torque;
+    pp_vec3_cross(&rel_pos, force, &torque);
+
+    // Apply angular force (torque)
+    pp_body_add_angular_force(b, torque.x, torque.y, torque.z);
 }
 
 const struct _PPCollisionMapEntry *pp_physics_collision_map_search(BodyKind kind1, BodyKind kind2)
