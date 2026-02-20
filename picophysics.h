@@ -267,6 +267,7 @@ typedef struct _PPTriangle
 PPVec3 *pp_vec3_init(PPVec3 *v);
 PPVec3 *pp_vec3_set(PPVec3 *v, float x, float y, float z);
 PPVec3 *pp_vec3_scale(const PPVec3 *v1, float t, PPVec3 *out);
+float pp_vec3_dot(const PPVec3 *v1, const PPVec3 *v2);
 PPVec3 *pp_vec3_assign(PPVec3 *target, const PPVec3 *source);
 bool pp_vec3_normalize(PPVec3 *target);
 float pp_vec3_length(const PPVec3 *v1);
@@ -788,13 +789,6 @@ void pp_quat_slerp(const PPQuaternion *q0, const PPQuaternion *q1, float t, PPQu
     result->w = s0 * q0->w + s1 * q1_temp.xyzw[3];
 }
 
-static float pp_plane_distance(const PPVec3 *n, const float d, const PPVec3 *p)
-{
-    float numerator = fabsf(n->x * p->x + n->y * p->y + n->z * p->z + d);
-    float denominator = sqrtf(n->x * n->x + n->y * n->y + n->z * n->z);
-    return numerator / denominator;
-}
-
 bool pp_box_intersect(
     const PPBox *sphere, const PPVec3 *o, const PPVec3 *d, PPVec3 *out, float *distance);
 bool pp_sphere_intersect(
@@ -837,7 +831,7 @@ bool pp_physics_ray_intersect(const PPVec3 *origin,
     float closest_dist = FLT_MAX;
     const PPTriangle *closest_tri = NULL;
     const PPBody *closest_body = NULL;
-    PPVec3 closest_intersection;
+    PPVec3 closest_intersection = {.xyz={0.0f, 0.0f, 0.0f}};
 
     for (size_t i = 0; i < pp_physics_triangle_count(); ++i) {
         const PPTriangle *t = pp_physics_triangle_at(i);
@@ -929,10 +923,10 @@ bool pp_aabb_intersect(const PPVec3 *pos,
                        PPVec3 *out,
                        float *distance)
 {
-    PPVec3 extents = {whd->x * 0.5f, whd->y * 0.5f, whd->z * 0.5f};
-    PPVec3 min = {pos->x - extents.x, pos->y - extents.y, pos->z - extents.z};
-    PPVec3 max = {pos->x + extents.x, pos->y + extents.y, pos->z + extents.z};
-    PPVec3 n_inv = {1.0f / direction->x, 1.0f / direction->y, 1.0f / direction->z};
+    PPVec3 extents = {.xyz={whd->x * 0.5f, whd->y * 0.5f, whd->z * 0.5f}};
+    PPVec3 min = {.xyz={pos->x - extents.x, pos->y - extents.y, pos->z - extents.z}};
+    PPVec3 max = {.xyz={pos->x + extents.x, pos->y + extents.y, pos->z + extents.z}};
+    PPVec3 n_inv = {.xyz={1.0f / direction->x, 1.0f / direction->y, 1.0f / direction->z}};
 
     const float t1 = (min.x - origin->x) * n_inv.x;
     const float t2 = (max.x - origin->x) * n_inv.x;
@@ -1344,7 +1338,7 @@ PPBox *pp_box_init(
         memset(s->body.inertia.m, 0, sizeof(s->body.inertia.m));
         memset(s->body.inv_inertia.m, 0, sizeof(s->body.inv_inertia.m));
     }
-    
+
     pp_body_init(&s->body, pos, mass, kind);
 
     pp_vec3_set(&s->whd, width, height, depth);
@@ -1385,10 +1379,10 @@ void pp_body_set_rotation(PPBody *s, float x, float y, float z, float w)
 
 void pp_body_get_velocity_at_position(const PPBody *b, const PPVec3 *p, PPVec3 *ret)
 {
-    PPVec3 rel_pos, local_rel_pos, a_vel_contrib;
+    PPVec3 rel_pos, a_vel_contrib;
     pp_vec3_sub(p, &b->pos, &rel_pos);
-    pp_vec3_cross(&b->a_vel, &local_rel_pos, &a_vel_contrib);
-    pp_vec3_add(&b->pos, &a_vel_contrib, ret);
+    pp_vec3_cross(&b->a_vel, &rel_pos, &a_vel_contrib);
+    pp_vec3_add(&b->vel, &a_vel_contrib, ret);
 }
 
 void pp_body_get_velocity(const PPBody *s, PPVec3 *vel)
@@ -2669,7 +2663,7 @@ bool pp_sphere_box_intersect(
     pp_quat_transform(&box_rot_inv, &tmp, &sphere_center_local);
 
     // Clamp sphere center to box extents (local space)
-    PPVec3 half_extents = {rhs->whd.x * 0.5f, rhs->whd.y * 0.5f, rhs->whd.z * 0.5f};
+    PPVec3 half_extents = {.xyz={rhs->whd.x * 0.5f, rhs->whd.y * 0.5f, rhs->whd.z * 0.5f}};
     PPVec3 closest_local = sphere_center_local;
     if (closest_local.x < -half_extents.x)
         closest_local.x = -half_extents.x;
