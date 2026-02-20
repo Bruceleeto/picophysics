@@ -143,20 +143,19 @@ bool ball_wall_collision(
 bool ball_car_collision(
     const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c, const void *)
 {
-    // PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
-    // PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
-    // PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
+    PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
+    PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
+    PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
 
-    // PPVec3 vel;
-    // pp_vec3_scale(&c->n, -10.0f, &vel);
-    // pp_body_add_force(PP_BODY(ball), vel.x, vel.y, vel.z);
-    return true;
+    PPVec3 vel;
+    pp_vec3_scale(&c->n, -15.0f, &vel);
+    pp_body_add_force_at_position(PP_BODY(ball), &c->p, &vel);
+    return false;
 }
 
 void rotate_to_direction(PPBox *sphere, const PPVec3 *target_forward, float dt)
 {
-    // 720 degrees a second
-    const float rot_rate_in_radians = (M_PI * 2.0f) * 2.0f;
+    const float rot_rate_in_degrees = 360.0f;
 
     PPVec3 forward;
     pp_vec3_set(&forward, 0, 0, -1);
@@ -178,17 +177,18 @@ void GameScene::on_load() {
     float cs = 1.0f / car_mesh2->aabb().max_dimension();
     car_mesh2->transform_vertices(smlt::Mat4::as_scale(smlt::Vec3(cs, cs, cs)));
 
+    auto mesh = assets->load_mesh("assets/ball/mesh.obj");
+    auto s = 1.5f / mesh->aabb().max_dimension();
+    mesh->transform_vertices(smlt::Mat4::as_scale(smlt::Vec3(s, s, s)));
+
     PPVec3 pos;
     pp_vec3_set(&pos, 0, 2, 0);
-    ball_.body = pp_physics_create_sphere(0.5f, &pos, 0.025f, BALL_KIND);
+    ball_.body = pp_physics_create_sphere(mesh->aabb().height() * 0.5f, &pos, 0.025f, BALL_KIND);
     // pp_body_set_friction(PP_BODY(ball_.body), 0.9f);
 
     pp_vec3_set(&pos, 1.0f, 4, 0);
-    cars_[0].body = pp_physics_create_box(0.5f, 0.5f, 1.0f, &pos, 0.5f, CAR_BODY_KIND);
-    cars_[0].roll_body = pp_physics_create_sphere(car_mesh2->aabb().height() / 2,
-                                                  &pos,
-                                                  0.5f,
-                                                  CAR_INNER_KIND);
+    cars_[0].body = pp_physics_create_box(0.5f, 0.4f, 1.0f, &pos, 0.5f, CAR_BODY_KIND);
+    cars_[0].roll_body = pp_physics_create_sphere(0.5f, &pos, 0.5f, CAR_INNER_KIND);
     pp_body_set_user_data(PP_BODY(cars_[0].body), cars_[0].roll_body);
 
     pp_body_lock_axis(PP_BODY(cars_[0].body), PP_AXIS_LOCK_PITCH_AND_ROLL);
@@ -210,11 +210,12 @@ void GameScene::on_load() {
     cars_[0].roll_body_actor = create_child<smlt::Actor>(car_mesh1);
     cars_[0].body_actor = create_child<smlt::Actor>(car_mesh2);
 
-    // pp_body_set_angular_damping(PP_BODY(ball_.body), 0.2f);
-    pp_body_set_bounce(PP_BODY(ball_.body), 0.7f);
-    // pp_body_set_damping(PP_BODY(ball_.body), 0.1f);
+    pp_body_set_angular_damping(PP_BODY(ball_.body), 0.4f);
+    pp_body_set_bounce(PP_BODY(ball_.body), 0.8f);
+    pp_body_set_friction(PP_BODY(ball_.body), 0.8f);
+    pp_body_set_damping(PP_BODY(ball_.body), 0.25f);
     pp_body_set_bounce(PP_BODY(cars_[0].body), 0.1f);
-    pp_body_set_bounce(PP_BODY(cars_[0].roll_body), 0.1f);
+    pp_body_set_bounce(PP_BODY(cars_[0].roll_body), 0.01f);
     pp_body_set_friction(PP_BODY(cars_[0].roll_body), 0.9f);
     pp_body_set_damping(PP_BODY(cars_[0].roll_body), 0.6f);
     pp_body_limit_velocity(PP_BODY(cars_[0].roll_body), 12.0f);
@@ -224,17 +225,13 @@ void GameScene::on_load() {
 
     PPVec3 grv;
     pp_vec3_init(&grv);
-    grv.xyz[1] = -3.0f;
+    grv.xyz[1] = -5.0f;
     pp_physics_set_gravity(&grv);
 
     camera_ = create_child<smlt::Camera3D>();
     camera_->set_perspective_projection(smlt::Degrees(60.0f), window->aspect_ratio());
     camera_->transform->set_position(smlt::Vec3(0, 10, 8));
     camera_->transform->look_at(smlt::Vec3());
-
-    auto mesh = assets->load_mesh("assets/ball/mesh.obj");
-    auto s = 1.0f / mesh->aabb().max_dimension();
-    mesh->transform_vertices(smlt::Mat4::as_scale(smlt::Vec3(s, s, s)));
 
     ball_.actor = create_child<smlt::Actor>(mesh);
 
@@ -337,12 +334,24 @@ void GameScene::on_update(float dt) {
         pp_vec3_scale(&f, thrust * 5.0f, &f);
         pp_body_add_force(PP_BODY(cars_[0].roll_body), f.xyz[0], f.xyz[1], f.xyz[2]);
 
-        if (input->axis_was_pressed("Fire1") && grounded) {
-            pp_body_add_force(PP_BODY(cars_[0].roll_body), 0, 100.0f, 0);
+        if (input->axis_was_pressed("Fire1")) {
+            auto vel = cars_[0].roll_body->body.vel;
+            vel.y = 8.0f;
+            pp_body_set_velocity(PP_BODY(cars_[0].roll_body), vel.xyz[0], vel.xyz[1], vel.xyz[2]);
+            // pp_body_add_force(PP_BODY(cars_[0].roll_body), 0, 200.0f, 0);
         }
     } else {
-        pp_vec3_scale(&f, thrust * 0.5f, &f);
+        pp_vec3_scale(&f, thrust * 2.5f, &f);
         pp_body_add_force(PP_BODY(cars_[0].roll_body), f.xyz[0], f.xyz[1], f.xyz[2]);
+    }
+
+    if (input->axis_value_hard("Fire2")) {
+        // Boost
+        PPVec3 forward;
+        pp_body_get_forward(PP_BODY(cars_[0].body), &forward);
+
+        pp_vec3_scale(&forward, 10.0f, &forward);
+        pp_body_add_force(PP_BODY(cars_[0].roll_body), forward.x, forward.y, forward.z);
     }
 
     camera_->transform->look_at(cars_[0].body_actor->transform->position(), smlt::Vec3::up());
