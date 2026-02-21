@@ -234,6 +234,10 @@ typedef struct _PPBody
 
     float vel_limit;
     float a_vel_limit;
+
+    // Used to reduce or increase gravity applied
+    // to a particular body
+    float gravity_multiplier;
 } PPBody;
 
 typedef struct _PPSphere
@@ -357,7 +361,8 @@ void pp_body_set_velocity(PPBody *s, float x, float y, float z);
 void pp_body_set_angular_acceleration(PPBody *s, float x, float y, float z);
 void pp_body_set_acceleration(PPBody *s, float x, float y, float z);
 void pp_body_look_at(PPBody *s, float x, float y, float z);
-
+void pp_body_set_gravity_multiplier(PPBody *b, float multiplier);
+float pp_body_get_gravity_multiplier(const PPBody *b);
 /**
  * Limit the maximium velocity of the object. The limit will be applied after
  * adding acceleration forces. Passing 0.0f will remove the limit.
@@ -1122,6 +1127,14 @@ void pp_body_set_acceleration(PPBody *s, float x, float y, float z)
     pp_vec3_set(&s->acc, x, y, z);
 }
 
+void pp_body_set_gravity_multiplier(PPBody *b, float multiplier) {
+    b->gravity_multiplier = multiplier;
+}
+
+float pp_body_get_gravity_multiplier(const PPBody *b) {
+    return b->gravity_multiplier;
+}
+
 void pp_body_set_angular_damping(PPBody *s, float d)
 {
     if (d < 0.0f || d > 1.0f) {
@@ -1296,6 +1309,7 @@ static void pp_body_init(PPBody *body, const PPVec3 *pos, float mass, BodyKind k
     body->a_damping = 0.02f;
     body->vel_limit = 0.0f;
     body->a_vel_limit = 0.0f;
+    body->gravity_multiplier = 1.0f;
     pp_body_set_bounce(body, 0.5f);
 }
 
@@ -1712,8 +1726,9 @@ static void pp_integrate_forces(float t)
 
         // Apply gravity to acceleration before applying acceleration
         // to velocity
-        PPVec3 total_acc;
-        pp_vec3_add(&body->acc, &gravity, &total_acc);
+        PPVec3 total_acc, grv;
+        pp_vec3_scale(&gravity, body->gravity_multiplier, &grv);
+        pp_vec3_add(&body->acc, &grv, &total_acc);
 
         pp_vec3_scale(&total_acc, t, &scaled_vel);
         pp_vec3_add(&body->vel, &scaled_vel, &body->vel);

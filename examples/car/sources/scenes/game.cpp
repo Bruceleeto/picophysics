@@ -220,6 +220,7 @@ void GameScene::on_load() {
     pp_body_set_damping(PP_BODY(cars_[0].roll_body), 0.6f);
     pp_body_limit_velocity(PP_BODY(cars_[0].roll_body), 12.0f);
     pp_body_limit_velocity(PP_BODY(ball_.body), 10.0f);
+    pp_body_set_gravity_multiplier(PP_BODY(ball_.body), 0.5f);
 
     define_stadium();
 
