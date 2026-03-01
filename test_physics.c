@@ -96,7 +96,7 @@ int main(int argc, char* argv[]) {
     PPSphere* lhs = pp_physics_create_sphere(1.0f, &p1, 1, 0);
     PPSphere* rhs = pp_physics_create_sphere(1.0f, &p2, 1, 0);
 
-    pp_physics_step(1.0f / 60.0f);
+    pp_physics_step(1.0f / 60.0f, 8, 3);
 
     CHECK(lhs->body.pos.xyz[0] == -1.0f, "Unexpected position\n");
     CHECK(rhs->body.pos.xyz[0] == 1.0f, "Unexpected position\n");
@@ -114,7 +114,7 @@ int main(int argc, char* argv[]) {
 
     pp_physics_create_triangle(&v1, &v2, &v3, 0);
 
-    pp_physics_step(1.0f / 60.0f);
+    pp_physics_step(1.0f / 60.0f, 8, 3);
 
     CHECK(lhs->body.pos.xyz[1] == 1.0f, "Body position didn't move");
 
@@ -143,7 +143,7 @@ int main(int argc, char* argv[]) {
     PPBox* b1 = pp_physics_create_box(1.0f, 1.0f, 1.0f, &p1, 1.0f, 0);
     PPSphere* s1 = pp_physics_create_sphere(1.0f, &p2, 1, 0);
 
-    pp_physics_step(1.0f / 60.0f);
+    pp_physics_step(1.0f / 60.0f, 8, 3);
 
     fprintf(stderr, "Position of b1: %f, %f, %f\n", b1->body.pos.xyz[0], b1->body.pos.xyz[1], b1->body.pos.xyz[2]);
     fprintf(stderr, "Position of s1: %f, %f, %f\n", s1->body.pos.xyz[0], s1->body.pos.xyz[1], s1->body.pos.xyz[2]);
@@ -154,7 +154,7 @@ int main(int argc, char* argv[]) {
     pp_body_set_position(PP_BODY(b1), p2.x, p2.y, p2.z);
     pp_body_set_position(PP_BODY(s1), p1.x, p1.y, p1.z);
 
-    pp_physics_step(1.0f / 60.0f);
+    pp_physics_step(1.0f / 60.0f, 8, 3);
 
     CHECK(b1->body.pos.xyz[0] == 0.75f, "Unexpected position\n");  // Boxes don't move
     CHECK(s1->body.pos.xyz[0] == -0.75f, "Unexpected position\n");
@@ -209,6 +209,20 @@ int main(int argc, char* argv[]) {
     CHECK(CLOSE(I.m[3], 0), "Unexpected value");
     CHECK(CLOSE(I.m[4], 1), "Unexpected value");
     CHECK(CLOSE(I.m[5], 0), "Unexpected value");
+
+    PPBody* cb1 = PP_BODY(pp_physics_create_sphere(0.5f, NULL, 1.0f, 1));
+    PPBody* cb2 = PP_BODY(pp_physics_create_sphere(0.5f, NULL, 1.0f, 1));
+
+    PPConstraint* c = pp_physics_create_fixed_distance_constraint(cb1, cb2, 1.0f);
+
+    CHECK(c, "Couldn't create constraint");
+
+    CHECK(pp_body_get_constraint_count(cb1) == 1, "Unexpected constraint count");
+    CHECK(pp_body_get_constraint_count(cb2) == 1, "Unexpected constraint count");
+
+    pp_physics_destroy_body(cb1);
+
+    CHECK(pp_body_get_constraint_count(cb2) == 0, "Unexpected constraint count");
 
     return 0;
 }

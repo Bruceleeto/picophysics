@@ -443,6 +443,7 @@ static int object_count = 0;
 static int dead_object_count = 0;
 static PPConstraint constraints[PICOPHYSICS_MAX_CONSTRAINTS];
 static int constraint_count = 0;
+static int dead_constraint_count = 0;
 
 /* This body is used to represent the entire tri-mesh. It's static,
  * has a mass of zero and an inv_mass of zero and so it should never change
@@ -1661,8 +1662,21 @@ PPSphere *pp_physics_create_sphere(float radius, const PPVec3 *pos, float mass, 
 }
 
 PPConstraint* pp_physics_create_fixed_distance_constraint(PPBody* body1, PPBody* body2, float distance) {
-    // FIXME: reuse old slots
-    PPConstraint* entry = &constraints[constraint_count++];
+    PPConstraint* entry = NULL;
+
+    if(dead_constraint_count) {
+        for (int i = 0; i < constraint_count; ++i) {
+            PPConstraint* c = &constraints[i];
+            if (!c->is_alive) {
+                dead_constraint_count--;
+                entry = c;
+                break;
+            }
+        }
+    } else {
+        entry = &constraints[constraint_count++];
+    }
+
     entry->is_alive = true;
     entry->body1 = body1;
     entry->body2 = body2;
@@ -1760,6 +1774,15 @@ void pp_physics_destroy_body(PPBody *b)
 {
     if (!b) {
         return;
+    }
+
+    // Destroy any constraints
+    for(int i = 0; i < constraint_count; ++i) {
+        PPConstraint* c = &constraints[i];
+        if(c->is_alive && (c->body1 == b || c->body2 == b)) {
+            c->is_alive = false;
+            ++dead_constraint_count;
+        }
     }
 
     b->is_alive = false;
