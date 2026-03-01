@@ -6,10 +6,12 @@
  * for the N64 port of the Dreamcast game Driving Strikers, where every cycle counts and I needed
  * full control and understanding of what was happening.
  *
+ * Picophysics isn't just small, but it's conceptually simple.
+ *
  * # Features
  *
  * - Create fully dynamic spheres and boxes and apply linear and angular forces
- * - Create environments using triangles and boxes
+ * - Create environments using triangles
  * - Easy to use collision callback system to respond to detected collisions and to
  *   choose whether to respond at at all (return true to respond)
  * - Ray casting
@@ -22,11 +24,13 @@
  * Picophysics only supports the following primitives:
  *
  * - Spheres (fully dynamic and responsive)
- * - Boxes (only collides with other boxes and spheres)
+ * - Boxes (only collides with spheres currently)
  * - Triangles (static environment)
  *
  * Bodies are not composable; there's no separation between a body and a collider like in other
  * physics engines there are simply Spheres and Boxes which react to each other and the environment.
+ *
+ * Bodies however can be joined together through constraints. Currently only fixed distance constraints are supported.
  *
  * Currently Spheres are the only fully dynamic and responsive object. Ray-casting
  * the world is also supported.
@@ -60,10 +64,10 @@
  *
  * # Roadmap
  *
- * - Proper manifold generation for GJK/EPA
+ * - Proper multi-point manifold generation for GJK/EPA
  * - Potentially switch to SAT as GJK is only being used for box/box collisions and SAT seems more suitable for one-shot manifold generation
  * - Add box/triangle collisions
- * - Allow objects to be marked as static
+ * - Add box/box collisions
  * - Broad-phase collision detection (spatial hashing)
  * - Add fixed and spring joints (links) between objects
  * - Optimisations (replacing divisions where possible)
@@ -81,7 +85,7 @@
  * #define PICOPHYSICS_IMPLEMENTATION
  * #include "picophysics.h"
  *
- * You must regularly call `pp_physics_step(step, iterations)` to run the simulation.
+ * You must regularly call `pp_physics_step(step, vel_iterations, pos_iterations)` to run the simulation.
  *
  * # Examples
  *
