@@ -118,6 +118,30 @@ void GameScene::on_update(float dt) {
         s->actor = create_child<smlt::Actor>(m);
     }
 
+    if (input->axis_was_pressed("Fire1")) {
+        // Link together two random shapes
+        PPBody *b1 = nullptr;
+        PPBody *b2 = nullptr;
+
+        for (auto &shape : shapes_) {
+            if (!pp_body_get_constraint_count(shape.body)) {
+                if (!b1) {
+                    b1 = shape.body;
+                    continue;
+                }
+
+                if (!b2) {
+                    b2 = shape.body;
+                    break;
+                }
+            }
+        }
+
+        if (b1 && b2) {
+            pp_physics_create_fixed_distance_constraint(b1, b2, 0.5f);
+        }
+    }
+
     for (int i = 0; i < shape_count_; ++i) {
         Shape *s = &shapes_[i];
         PPVec3 pos;

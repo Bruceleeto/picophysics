@@ -143,14 +143,14 @@ bool ball_wall_collision(
 bool ball_car_collision(
     const void *lhs, const void *rhs, BodyKind k0, BodyKind k1, const PPCollision *c, const void *)
 {
-    PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
-    PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
-    PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
+    // PPSphere *ball = (k0 == BALL_KIND) ? (PPSphere *) lhs : (PPSphere *) rhs;
+    // PPBox *car = (k0 == CAR_BODY_KIND) ? (PPBox *) lhs : (PPBox *) rhs;
+    // PPSphere *car_ball_body = (PPSphere *) pp_body_get_user_data(PP_BODY(car));
 
-    PPVec3 vel;
-    pp_vec3_scale(&c->n, -15.0f, &vel);
-    pp_body_add_force_at_position(PP_BODY(ball), &c->p, &vel);
-    return false;
+    // PPVec3 vel;
+    // pp_vec3_scale(&c->n, -15.0f, &vel);
+    // pp_body_add_force_at_position(PP_BODY(ball), &c->p, &vel);
+    return true;
 }
 
 void rotate_to_direction(PPBox *sphere, const PPVec3 *target_forward, float dt)
@@ -189,6 +189,10 @@ void GameScene::on_load() {
     pp_vec3_set(&pos, 1.0f, 4, 0);
     cars_[0].body = pp_physics_create_box(0.5f, 0.4f, 1.0f, &pos, 0.5f, CAR_BODY_KIND);
     cars_[0].roll_body = pp_physics_create_sphere(0.5f, &pos, 0.5f, CAR_INNER_KIND);
+
+    pp_physics_create_fixed_distance_constraint(PP_BODY(cars_[0].body),
+                                                PP_BODY(cars_[0].roll_body),
+                                                0.0f);
     pp_body_set_user_data(PP_BODY(cars_[0].body), cars_[0].roll_body);
 
     pp_body_lock_axis(PP_BODY(cars_[0].body), PP_AXIS_LOCK_PITCH_AND_ROLL);
@@ -276,26 +280,26 @@ void GameScene::on_fixed_update(float step)
     PPVec3 roll_velocity;
     pp_body_get_velocity(PP_BODY(cars_[0].roll_body), &roll_velocity);
 
-    float side_vel = pp_vec3_dot(&roll_velocity, &right);
+    float side_vel = pp_vec3_dot(&roll_velocity, &right) / step;
 
     PPVec3 force;
     pp_vec3_scale(&right, -side_vel * pp_body_get_mass(PP_BODY(cars_[0].roll_body)), &force);
     pp_body_add_force(PP_BODY(cars_[0].roll_body), force.x, force.y, force.z);
 
-    // The inner ball rolls on the floor
-    // The body collides with walls, balls, and cars
-    // The body needs to be positioned above the inner ball (which is smaller)
+    // // The inner ball rolls on the floor
+    // // The body collides with walls, balls, and cars
+    // // The body needs to be positioned above the inner ball (which is smaller)
 
-    PPVec3 inner_pos;
-    pp_body_get_position(PP_BODY(cars_[0].roll_body), &inner_pos);
-    float br = pp_box_get_height(cars_[0].body);
-    float ir = pp_sphere_get_radius(cars_[0].roll_body);
+    // PPVec3 inner_pos;
+    // pp_body_get_position(PP_BODY(cars_[0].roll_body), &inner_pos);
+    // float br = pp_box_get_height(cars_[0].body);
+    // float ir = pp_sphere_get_radius(cars_[0].roll_body);
 
-    // Align the car body with the inner roll_body
-    pp_body_set_position(PP_BODY(cars_[0].body),
-                         inner_pos.xyz[0],
-                         inner_pos.xyz[1] + (br - ir),
-                         inner_pos.xyz[2]);
+    // // Align the car body with the inner roll_body
+    // pp_body_set_position(PP_BODY(cars_[0].body),
+    //                      inner_pos.xyz[0],
+    //                      inner_pos.xyz[1] + (br - ir),
+    //                      inner_pos.xyz[2]);
 }
 
 void GameScene::on_update(float dt) {

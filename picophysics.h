@@ -203,6 +203,29 @@ typedef enum _PPAxisLock {
     PP_AXIS_LOCK_ALL = PP_AXIS_LOCK_PITCH | PP_AXIS_LOCK_YAW | PP_AXIS_LOCK_ROLL
 } PPAxisLock;
 
+typedef enum _PPConstraintType {
+    PP_CONSTRAINT_TYPE_FIXED_DISTANCE,
+    PP_CONSTRAINT_TYPE_FIXED,
+} PPConstraintType;
+
+typedef struct _PPFixedDistanceConstraint {
+    float distance;
+} PPFixedDistanceConstraint;
+
+typedef struct _PPConstraint {
+    bool is_alive;
+    PPConstraintType type;
+    PPBody* body1;
+    PPBody* body2;
+
+    union {
+        PPFixedDistanceConstraint fixed_distance;
+    };
+
+    // Combined mass of both bodies.
+    float inv_mass_sum;
+} PPConstraint;
+
 typedef struct _PPBody
 {
     PPObjectType type;
@@ -326,6 +349,9 @@ float pp_box_get_width(const PPBox *b);
 float pp_box_get_height(const PPBox *b);
 float pp_box_get_depth(const PPBox *b);
 
+size_t pp_body_get_constraint_count(PPBody *body);
+PPConstraint* pp_physics_create_fixed_distance_constraint(PPBody* body1, PPBody* body2, float distance);
+
 void pp_physics_destroy_body(PPBody *b);
 const PPBody *pp_physics_body_at(size_t i);
 size_t pp_physics_body_count();
@@ -399,6 +425,10 @@ void pp_body_limit_angular_velocity(PPBody *body, float speed);
 #define PICOPHYSICS_MAX_TRIANGLES 128
 #endif
 
+#ifndef PICOPHYSICS_MAX_CONSTRAINTS
+#define PICOPHYSICS_MAX_CONSTRAINTS 256
+#endif
+
 #ifndef PICOPHYSICS_MAX_MANIFOLDS
 #define PICOPHYSICS_MAX_MANIFOLDS 256
 #endif
@@ -411,6 +441,8 @@ typedef union _PPObject {
 static PPObject objects[PICOPHYSICS_MAX_OBJECTS];
 static int object_count = 0;
 static int dead_object_count = 0;
+static PPConstraint constraints[PICOPHYSICS_MAX_CONSTRAINTS];
+static int constraint_count = 0;
 
 /* This body is used to represent the entire tri-mesh. It's static,
  * has a mass of zero and an inv_mass of zero and so it should never change
@@ -1196,6 +1228,21 @@ float pp_sphere_get_radius(const PPSphere *s)
     return s->radius;
 }
 
+size_t pp_body_get_constraint_count(PPBody *body) {
+    size_t count = 0;
+    for(int i = 0; i < constraint_count; ++i) {
+        if(!constraints[i].is_alive) {
+            continue;
+        }
+
+        if (constraints[i].body1 == body || constraints[i].body2 == body) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
 void pp_quat_from_axis_angle(PPQuaternion *q, const PPVec3 *axis, float angle)
 {
     PPVec3 a;
@@ -1613,6 +1660,18 @@ PPSphere *pp_physics_create_sphere(float radius, const PPVec3 *pos, float mass, 
     return ret;
 }
 
+PPConstraint* pp_physics_create_fixed_distance_constraint(PPBody* body1, PPBody* body2, float distance) {
+    // FIXME: reuse old slots
+    PPConstraint* entry = &constraints[constraint_count++];
+    entry->is_alive = true;
+    entry->body1 = body1;
+    entry->body2 = body2;
+    entry->type = PP_CONSTRAINT_TYPE_FIXED_DISTANCE;
+    entry->fixed_distance.distance = distance;
+    entry->inv_mass_sum = body1->inv_mass + body2->inv_mass;
+    return entry;
+}
+
 PPBox *pp_physics_create_box(
     float width, float height, float depth, const PPVec3 *pos, float mass, BodyKind kind)
 {
@@ -1779,6 +1838,147 @@ static void pp_integrate_forces(float t)
             pp_vec3_normalize(&body->a_vel);
             pp_vec3_scale(&body->a_vel, body->a_vel_limit, &body->a_vel);
         }
+    }
+}
+
+static void pp_solve_constraint_fixed_distance_velocities(PPBody* b1, PPBody* b2, float inv_sum, float target, float dt) {
+    float inv_m1 = b1->inv_mass;
+    float inv_m2 = b2->inv_mass;
+
+    PPVec3 delta;
+    pp_vec3_sub(&b2->pos, &b1->pos, &delta);
+
+    float dist = pp_vec3_length(&delta);
+    if(dist < 1e-6f){
+        // Already close enough
+        return;
+    }
+
+    PPVec3 n;
+    pp_vec3_scale(&delta, 1.0f / dist, &n);
+
+    PPVec3 rel_vel;
+    pp_vec3_sub(&b2->vel, &b1->vel, &rel_vel);
+    float v_rel = pp_vec3_dot(&rel_vel, &n);
+
+    float Cpos = dist - target;
+
+    /* Baumgarte bias */
+    const float beta = 0.2f;             // bias factor
+    const float slop_vel = 0.001f;       // tiny dead zone for bias
+    float bias = 0.0f;
+    if (fabsf(Cpos) > slop_vel && dt > 0.0f) {
+        // Correct sign: positive Cpos (too far apart) should produce a
+        // positive bias so that the computed impulse pulls bodies together.
+        bias = (beta / dt) * Cpos;
+    }
+
+    /* effective mass (linear only) */
+    float K = inv_sum;
+
+    if (K < 1e-8f) {
+        return;
+    }
+
+    float J = -(v_rel + bias) / K;
+
+    /* clamp impulse to avoid instability */
+    const float maxJ = 1000.0f;
+    if (J > maxJ) J = maxJ;
+    else if (J < -maxJ) J = -maxJ;
+
+    /* apply linear impulses */
+    PPVec3 impulse;
+    pp_vec3_scale(&n, J, &impulse);
+
+    PPVec3 tmp;
+    // b1 gets negative impulse
+    pp_vec3_scale(&impulse, inv_m1, &tmp);
+    pp_vec3_sub(&b1->vel, &tmp, &b1->vel);
+
+    // b2 gets positive impulse
+    pp_vec3_scale(&impulse, inv_m2, &tmp);
+    pp_vec3_add(&b2->vel, &tmp, &b2->vel);
+}
+
+static void pp_solve_constraint_velocities(PPConstraint* entry, float dt) {
+    if(!entry || !entry->is_alive) {
+        return;
+    }
+
+    PPBody* b1 = entry->body1;
+    PPBody* b2 = entry->body2;
+    if(!b1 || !b2 || !b1->is_alive || !b2->is_alive || entry->inv_mass_sum < 1e-8f){
+        return;
+    }
+
+    if (entry->type == PP_CONSTRAINT_TYPE_FIXED_DISTANCE) {
+        pp_solve_constraint_fixed_distance_velocities(b1,
+                                                      b2,
+                                                      entry->inv_mass_sum,
+                                                      entry->fixed_distance.distance,
+                                                      dt);
+    } else {
+        fprintf(stderr, "Constraint unimplemented\n");
+    }
+}
+
+static void pp_solve_constraint_fixed_distance_positions(PPBody* b1, PPBody* b2, float inv_mass_sum, float target, float dt) {
+    float inv_m1 = b1->inv_mass;
+    float inv_m2 = b2->inv_mass;
+
+    PPVec3 delta;
+    pp_vec3_sub(&b2->pos, &b1->pos, &delta);
+
+    float current = pp_vec3_length(&delta);
+    if (current < 1e-6f) {
+        // degenerate; nothing sensible to do
+        return;
+    }
+
+    PPVec3 n;
+    pp_vec3_scale(&delta, 1.0f / current, &n);
+
+    float Cpos = current - target;
+
+    const float slop = 0.01f;   // positional dead zone
+    if (fabsf(Cpos) <= slop) {
+        return;
+    }
+
+    const float percent = 0.2f; // apply 20% of correction per iteration
+    float correction = (Cpos - (Cpos > 0.0f ? slop : -slop)) * percent;
+
+    // distribute correction by inverse mass
+    PPVec3 corr;
+    // Move bodies TOWARD each other: b1 moves along +n, b2 moves along -n
+    pp_vec3_scale(&n, correction * (inv_m1 / inv_mass_sum), &corr);
+    pp_vec3_add(&b1->pos, &corr, &b1->pos);
+
+    pp_vec3_scale(&n, correction * (inv_m2 / inv_mass_sum), &corr);
+    pp_vec3_sub(&b2->pos, &corr, &b2->pos);
+}
+
+static void pp_solve_constraint_positions(PPConstraint *entry, float dt)
+{
+    if(!entry || !entry->is_alive) {
+        return;
+    }
+
+    PPBody* b1 = entry->body1;
+    PPBody* b2 = entry->body2;
+    if(!b1 || !b2 || !b1->is_alive || !b2->is_alive || entry->inv_mass_sum < 1e-8f){
+        return;
+    }
+
+    if(entry->type == PP_CONSTRAINT_TYPE_FIXED_DISTANCE){
+        pp_solve_constraint_fixed_distance_positions(b1,
+                                                     b2,
+                                                     entry->inv_mass_sum,
+                                                     entry->fixed_distance.distance,
+                                                     dt);
+    } else {
+        fprintf(stderr, "Constraint unimplemented\n");
     }
 }
 
@@ -2946,6 +3146,10 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
         for (int i = 0; i < manifold_count; ++i) {
             pp_solve_velocities(&manifolds[i]);
         }
+
+        for(int i = 0; i < constraint_count; ++i) {
+            pp_solve_constraint_velocities(&constraints[i], t);
+        }
     }
 
     pp_integrate_velocities(t);
@@ -2953,6 +3157,10 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
     for (int j = 0; j < pos_iterations; ++j) {
         for (int i = 0; i < manifold_count; ++i) {
             pp_solve_positions(&manifolds[i]);
+        }
+
+        for(int i = 0; i < constraint_count; ++i) {
+            pp_solve_constraint_positions(&constraints[i], t);
         }
     }
 }
