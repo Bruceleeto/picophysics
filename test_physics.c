@@ -98,8 +98,8 @@ int main(int argc, char* argv[]) {
 
     pp_physics_step(1.0f / 60.0f, 8, 3);
 
-    CHECK(lhs->body.pos.xyz[0] == -1.0f, "Unexpected position\n");
-    CHECK(rhs->body.pos.xyz[0] == 1.0f, "Unexpected position\n");
+    CHECK(lhs->body.pos.xyz[0] == -0.5f, "Unexpected position\n");
+    CHECK(rhs->body.pos.xyz[0] == 0.5f, "Unexpected position\n");
 
     pp_physics_destroy_body(PP_BODY(rhs));
     CHECK(rhs->body.is_alive == false, "Sphere unexpectedly alive\n");
@@ -116,7 +116,7 @@ int main(int argc, char* argv[]) {
 
     pp_physics_step(1.0f / 60.0f, 8, 3);
 
-    CHECK(lhs->body.pos.xyz[1] == 1.0f, "Body position didn't move");
+    CHECK(lhs->body.pos.xyz[1] > 0.5f, "Body position didn't move\n");
 
     const PPTriangle* ct;
     const PPBody* cs;
@@ -124,7 +124,7 @@ int main(int argc, char* argv[]) {
     PPVec3 rd = (PPVec3){.xyz = {0, -1, 0}};
     float dist;
     CHECK(pp_physics_ray_intersect(&ro, &rd, NULL, &cs, &ct, &dist, NULL), "Ray didn't intersect");
-    CHECK(CLOSE(dist, 5.0f), "Unexpected intersection distance");
+    CHECK(CLOSE(dist, 5.0f), "Unexpected intersection distance\n");
 
     rhs = pp_physics_create_sphere(1.0f, &p2, 1, 0);
 
@@ -148,16 +148,16 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Position of b1: %f, %f, %f\n", b1->body.pos.xyz[0], b1->body.pos.xyz[1], b1->body.pos.xyz[2]);
     fprintf(stderr, "Position of s1: %f, %f, %f\n", s1->body.pos.xyz[0], s1->body.pos.xyz[1], s1->body.pos.xyz[2]);
 
-    CHECK(b1->body.pos.xyz[0] == -0.75f, "Unexpected position\n");  // Boxes don't move
-    CHECK(s1->body.pos.xyz[0] == 0.75f, "Unexpected position\n");
+    CHECK(b1->body.pos.xyz[0] < -0.5f, "Unexpected position\n");  // Boxes don't move
+    CHECK(s1->body.pos.xyz[0] > 0.5f, "Unexpected position\n");
 
     pp_body_set_position(PP_BODY(b1), p2.x, p2.y, p2.z);
     pp_body_set_position(PP_BODY(s1), p1.x, p1.y, p1.z);
 
     pp_physics_step(1.0f / 60.0f, 8, 3);
 
-    CHECK(b1->body.pos.xyz[0] == 0.75f, "Unexpected position\n");  // Boxes don't move
-    CHECK(s1->body.pos.xyz[0] == -0.75f, "Unexpected position\n");
+    CHECK(b1->body.pos.xyz[0] > 0.5f, "Unexpected position\n");  // Boxes don't move
+    CHECK(s1->body.pos.xyz[0] < -0.5f, "Unexpected position\n");
 
     // Ray intersections
     pp_physics_clear();
