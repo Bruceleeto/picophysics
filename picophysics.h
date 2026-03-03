@@ -1483,6 +1483,10 @@ bool pp_body_set_bounce(PPBody *s, float b)
 
 void pp_body_add_force(PPBody *s, float x, float y, float z)
 {
+    if(!s) {
+        return;
+    }
+
     PPVec3 force;
     pp_vec3_set(&force, x, y, z);
 
@@ -3045,13 +3049,36 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
             continue;
         }
 
+        const struct _PPCollisionMapEntry *cb = NULL;
+
         // Solve sphere/triangle first (as we're not yet an iterative solver)
         if (lhs_sphere) {
+            int last_kind = -1;
             for (int j = 0; j < tri_count; ++j) {
                 const PPTriangle *tri = tris + j;
 
-                const struct _PPCollisionMapEntry *cb
-                    = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
+                // Quick AABB or sphere check first
+                float max_x = fmaxf(fmaxf(tri->v[0].x, tri->v[1].x), tri->v[2].x);
+                float min_x = fminf(fminf(tri->v[0].x, tri->v[1].x), tri->v[2].x);
+                float max_y = fmaxf(fmaxf(tri->v[0].y, tri->v[1].y), tri->v[2].y);
+                float min_y = fminf(fminf(tri->v[0].y, tri->v[1].y), tri->v[2].y);
+                float max_z = fmaxf(fmaxf(tri->v[0].z, tri->v[1].z), tri->v[2].z);
+                float min_z = fminf(fminf(tri->v[0].z, tri->v[1].z), tri->v[2].z);
+
+                // Check if sphere bounds overlap with triangle AABB
+                float dx = fmaxf(0.0f, fmaxf(min_x - lhs_body->pos.x, lhs_body->pos.x - max_x));
+                float dy = fmaxf(0.0f, fmaxf(min_y - lhs_body->pos.y, lhs_body->pos.y - max_y));
+                float dz = fmaxf(0.0f, fmaxf(min_z - lhs_body->pos.z, lhs_body->pos.z - max_z));
+
+                float dist_sq = dx*dx + dy*dy + dz*dz;
+                if (dist_sq > lhs_sphere->radius * lhs_sphere->radius) {
+                    continue; // Skip expensive ray-cast
+                }
+
+                if(tri->kind != last_kind) {
+                    last_kind = tri->kind;
+                    cb = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
+                }
 
                 if(cb && !cb->collision_callback) {
                     // Explicit ignore - we don't even do the intersection here
