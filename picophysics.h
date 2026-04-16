@@ -277,6 +277,7 @@ typedef struct _PPBox
 {
     PPBody body;
     PPVec3 whd; // Width/height/depth
+    PPVec3 half_extents; // Cached: whd * 0.5f for faster collision detection
 
     float radius; // Used to shortcut collisions
 } PPBox;
@@ -289,6 +290,9 @@ typedef struct _PPTriangle
     BodyKind kind;
     float bounce;
     float friction;
+    // Precomputed AABB for fast sphere culling
+    float aabb_min_x, aabb_min_y, aabb_min_z;
+    float aabb_max_x, aabb_max_y, aabb_max_z;
 } PPTriangle;
 
 #define PP_BODY(p) ((PPBody *) p)
@@ -498,7 +502,7 @@ PPVec3 *pp_vec3_assign(PPVec3 *target, const PPVec3 *source)
     return target;
 }
 
-PPVec3 *pp_vec3_add(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out)
+static inline PPVec3 *pp_vec3_add(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out)
 {
     out->x = v1->x + v2->x;
     out->y = v1->y + v2->y;
@@ -506,7 +510,7 @@ PPVec3 *pp_vec3_add(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out)
     return out;
 }
 
-PPVec3 *pp_vec3_sub(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out)
+static inline PPVec3 *pp_vec3_sub(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out)
 {
     out->x = v1->x - v2->x;
     out->y = v1->y - v2->y;
@@ -514,7 +518,7 @@ PPVec3 *pp_vec3_sub(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out)
     return out;
 }
 
-PPVec3 *pp_vec3_scale(const PPVec3 *v1, float t, PPVec3 *out)
+static inline PPVec3 *pp_vec3_scale(const PPVec3 *v1, float t, PPVec3 *out)
 {
     out->x = v1->x * t;
     out->y = v1->y * t;
@@ -522,7 +526,7 @@ PPVec3 *pp_vec3_scale(const PPVec3 *v1, float t, PPVec3 *out)
     return out;
 }
 
-PPVec3 *pp_vec3_neg(const PPVec3 *v1, PPVec3 *out)
+static inline PPVec3 *pp_vec3_neg(const PPVec3 *v1, PPVec3 *out)
 {
     out->x = -v1->x;
     out->y = -v1->y;
@@ -530,24 +534,31 @@ PPVec3 *pp_vec3_neg(const PPVec3 *v1, PPVec3 *out)
     return out;
 }
 
-float pp_vec3_length(const PPVec3 *v1)
+static inline float pp_vec3_length(const PPVec3 *v1)
 {
     return sqrtf(v1->x * v1->x + v1->y * v1->y + v1->z * v1->z);
 }
 
-float pp_vec3_length_sq(const PPVec3 *v1)
+static inline float pp_vec3_length_sq(const PPVec3 *v1)
 {
     return v1->x * v1->x + v1->y * v1->y + v1->z * v1->z;
 }
 
-float pp_vec3_dist(const PPVec3 *v1, const PPVec3 *v2)
+static inline float pp_vec3_dist(const PPVec3 *v1, const PPVec3 *v2)
 {
     PPVec3 tmp;
     pp_vec3_sub(v2, v1, &tmp);
     return pp_vec3_length(&tmp);
 }
 
-PPVec3 *pp_vec3_cross(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out)
+static inline float pp_vec3_dist_sq(const PPVec3 *v1, const PPVec3 *v2)
+{
+    PPVec3 tmp;
+    pp_vec3_sub(v2, v1, &tmp);
+    return pp_vec3_length_sq(&tmp);
+}
+
+static inline PPVec3 *pp_vec3_cross(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out)
 {
     assert(v1 != out);
     assert(v2 != out);
@@ -558,7 +569,7 @@ PPVec3 *pp_vec3_cross(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out)
     return out;
 }
 
-float pp_vec3_dot(const PPVec3 *v1, const PPVec3 *v2)
+static inline float pp_vec3_dot(const PPVec3 *v1, const PPVec3 *v2)
 {
     return v1->x * v2->x + v1->y * v2->y + v1->z * v2->z;
 }
@@ -569,9 +580,10 @@ bool pp_vec3_normalize(PPVec3 *v)
 
     // Check for zero-length vector to avoid division by zero
     if (length > 0.0f) {
-        v->x /= length;
-        v->y /= length;
-        v->z /= length;
+        float inv_length = 1.0f / length;
+        v->x *= inv_length;
+        v->y *= inv_length;
+        v->z *= inv_length;
         return true;
     } else {
         pp_vec3_init(v);
@@ -706,11 +718,20 @@ void pp_quat_normalize(PPQuaternion *q)
 {
     float norm = sqrtf(q->x * q->x + q->y * q->y + q->z * q->z + q->w * q->w);
     if (norm > 0) {
-        q->x /= norm;
-        q->y /= norm;
-        q->z /= norm;
-        q->w /= norm;
+        float inv_norm = 1.0f / norm;
+        q->x *= inv_norm;
+        q->y *= inv_norm;
+        q->z *= inv_norm;
+        q->w *= inv_norm;
     }
+}
+
+static inline void pp_quat_conjugate(const PPQuaternion *q, PPQuaternion *out)
+{
+    out->x = -q->x;
+    out->y = -q->y;
+    out->z = -q->z;
+    out->w = q->w;
 }
 
 void pp_quat_forward(const PPQuaternion *q, PPVec3 *out)
@@ -849,6 +870,7 @@ bool pp_contains_kind(BodyKind *kinds, BodyKind kind)
         if (*k == kind) {
             return true;
         }
+        k++;
     }
 
     return false;
@@ -977,8 +999,8 @@ bool pp_aabb_intersect(const PPVec3 *pos,
     const float t5 = (min.z - origin->z) * n_inv.z;
     const float t6 = (max.z - origin->z) * n_inv.z;
 
-    const float tmin = fmax(fmax(fmin(t1, t2), fmin(t3, t4)), fmin(t5, t6));
-    const float tmax = fmin(fmin(fmax(t1, t2), fmax(t3, t4)), fmax(t5, t6));
+    const float tmin = fmaxf(fmaxf(fminf(t1, t2), fminf(t3, t4)), fminf(t5, t6));
+    const float tmax = fminf(fminf(fmaxf(t1, t2), fmaxf(t3, t4)), fmaxf(t5, t6));
 
     // if tmax < 0, ray (line) is intersecting AABB, but whole AABB is behind us
     if (tmax < 0) {
@@ -1054,78 +1076,60 @@ bool pp_sphere_intersect(
 bool pp_tri_intersect(
     const PPTriangle *tri, const PPVec3 *o, const PPVec3 *d, PPVec3 *out, float *distance)
 {
-    // PPVec3 v0v1, v0v2, pvec;
-    // pp_vec3_sub(&tri->v[1], &tri->v[0], &v0v1);
-    // pp_vec3_sub(&tri->v[1], &tri->v[0], &v0v1);
-    // pp_vec3_cross(d, &v0v2, &pvec);
-    // float det = pp_vec3_dot(&v0v1, &pvec);
-
-    // // If the determinant is negative, the triangle is back-facing.
-    // // If the determinant is close to 0, the ray misses the triangle.
-    // // if (det < FLT_EPSILON) return false;
-
-    // // If det is close to 0, the ray and triangle are parallel.
-    // if (fabs(det) < FLT_EPSILON) {
-    //     return false;
-    // }
-
-    // float invDet = 1 / det;
-
-    // PPVec3 tvec;
-    // pp_vec3_sub(o, &tri->v[0], &tvec);
-    // float u = pp_vec3_dot(&tvec, &pvec) * invDet;
-
-    // if (u < 0 || u > 1) {
-    //     return false;
-    // }
-
-    // PPVec3 qvec;
-    // pp_vec3_cross(&tvec, &v0v1, &qvec);
-
-    // float v = pp_vec3_dot(d, &qvec) * invDet;
-    // if (v < 0 || u + v > 1) {
-    //     return false;
-    // }
-
-    // float t = pp_vec3_dot(&v0v2, &qvec) * invDet;
-
-    // return true;
-
     const float e = FLT_EPSILON;
-    PPVec3 edge1, edge2, cross_e1, cross_e2, s;
-    pp_vec3_sub(&tri->v[1], &tri->v[0], &edge1);
-    pp_vec3_sub(&tri->v[2], &tri->v[0], &edge2);
-    pp_vec3_cross(d, &edge2, &cross_e2);
 
-    float det = pp_vec3_dot(&edge1, &cross_e2);
+    // Möller-Trumbore ray-triangle intersection, optimized with direct arithmetic
+    float edge1_x = tri->v[1].x - tri->v[0].x;
+    float edge1_y = tri->v[1].y - tri->v[0].y;
+    float edge1_z = tri->v[1].z - tri->v[0].z;
+    float edge2_x = tri->v[2].x - tri->v[0].x;
+    float edge2_y = tri->v[2].y - tri->v[0].y;
+    float edge2_z = tri->v[2].z - tri->v[0].z;
+
+    // cross_e2 = d × edge2
+    float cross_e2_x = d->y * edge2_z - d->z * edge2_y;
+    float cross_e2_y = d->z * edge2_x - d->x * edge2_z;
+    float cross_e2_z = d->x * edge2_y - d->y * edge2_x;
+
+    // det = edge1 · cross_e2
+    float det = edge1_x * cross_e2_x + edge1_y * cross_e2_y + edge1_z * cross_e2_z;
 
     if (det > -e && det < e) {
         return false;
     }
 
     float inv_det = 1.0f / det;
-    pp_vec3_sub(o, &tri->v[0], &s);
-    float u = inv_det * pp_vec3_dot(&s, &cross_e2);
 
-    if ((u < 0 && fabsf(u) > e) || (u > 1 && fabsf(u - 1) > e)) {
+    // s = o - v0
+    float s_x = o->x - tri->v[0].x;
+    float s_y = o->y - tri->v[0].y;
+    float s_z = o->z - tri->v[0].z;
+
+    float u = inv_det * (s_x * cross_e2_x + s_y * cross_e2_y + s_z * cross_e2_z);
+    if ((u < 0.0f && -u > e) || (u > 1.0f && fabsf(u - 1.0f) > e)) {
         return false;
     }
 
-    pp_vec3_cross(&s, &edge1, &cross_e1);
-    float v = inv_det * pp_vec3_dot(d, &cross_e1);
+    // cross_e1 = s × edge1
+    float cross_e1_x = s_y * edge1_z - s_z * edge1_y;
+    float cross_e1_y = s_z * edge1_x - s_x * edge1_z;
+    float cross_e1_z = s_x * edge1_y - s_y * edge1_x;
 
-    if ((v < 0 && fabsf(v) > e) || (u + v > 1 && fabsf(u + v - 1) > e)) {
+    float v = inv_det * (d->x * cross_e1_x + d->y * cross_e1_y + d->z * cross_e1_z);
+    if ((v < 0.0f && -v > e) || (u + v > 1.0f && fabsf(u + v - 1.0f) > e)) {
         return false;
     }
 
-    float t = inv_det * pp_vec3_dot(&edge2, &cross_e1);
-
+    float t = inv_det * (edge2_x * cross_e1_x + edge2_y * cross_e1_y + edge2_z * cross_e1_z);
     if (t <= e) {
         return false;
     }
 
-    pp_vec3_scale(d, t, out);
-    pp_vec3_add(out, o, out);
+    if (out) {
+        out->x = o->x + d->x * t;
+        out->y = o->y + d->y * t;
+        out->z = o->z + d->z * t;
+    }
 
     if (distance) {
         *distance = t;
@@ -1408,6 +1412,8 @@ PPBox *pp_box_init(
     pp_body_init(&s->body, pos, mass, kind);
 
     pp_vec3_set(&s->whd, width, height, depth);
+    // Cache half-extents for faster sphere-box collision detection
+    pp_vec3_set(&s->half_extents, width * 0.5f, height * 0.5f, depth * 0.5f);
     s->radius = pp_vec3_length(&s->whd);
 
     return s;
@@ -1571,7 +1577,7 @@ bool pp_physics_collision_map_add(BodyKind kind1,
     return false;
 }
 
-void pp_fill_collision_info_sphere_box(const PPSphere *lhs,
+static inline void pp_fill_collision_info_sphere_box(const PPSphere *lhs,
                                        const PPBox *rhs,
                                        const PPVec3 *contact_point,
                                        const PPVec3 *n,
@@ -1579,8 +1585,8 @@ void pp_fill_collision_info_sphere_box(const PPSphere *lhs,
                                        float d)
 {
     c->dist = d;
-    pp_vec3_assign(&c->p, contact_point);
-    pp_vec3_assign(&c->n, n);
+    c->p.x = contact_point->x; c->p.y = contact_point->y; c->p.z = contact_point->z;
+    c->n.x = n->x; c->n.y = n->y; c->n.z = n->z;
     c->obj1 = PP_BODY(lhs);
     c->obj2 = PP_BODY(rhs);
     c->obj1_bounce = c->obj1->bounce;
@@ -1593,26 +1599,27 @@ void pp_fill_collision_info_sphere_box(const PPSphere *lhs,
     c->kind2 = rhs->body.kind;
 }
 
-void pp_fill_collision_info_sphere_sphere(const PPSphere *lhs,
+static inline void pp_fill_collision_info_sphere_sphere(const PPSphere *lhs,
                                           const PPSphere *rhs,
                                           float dist,
                                           PPCollision *c)
 {
     float total_radius = lhs->radius + rhs->radius;
-    pp_vec3_sub(&rhs->body.pos, &lhs->body.pos, &c->n);
+    c->n.x = rhs->body.pos.x - lhs->body.pos.x;
+    c->n.y = rhs->body.pos.y - lhs->body.pos.y;
+    c->n.z = rhs->body.pos.z - lhs->body.pos.z;
     c->dist = dist - total_radius;
     if (dist > 0) {
-        c->n.xyz[0] /= dist;
-        c->n.xyz[1] /= dist;
-        c->n.xyz[2] /= dist;
+        float inv = 1.0f / dist;
+        c->n.x *= inv; c->n.y *= inv; c->n.z *= inv;
     }
 
     float wr1 = lhs->radius / total_radius;
     float wr2 = rhs->radius / total_radius;
 
-    for (int i = 0; i < 3; ++i) {
-        c->p.xyz[i] = lhs->body.pos.xyz[i] * wr1 + rhs->body.pos.xyz[i] * wr2;
-    }
+    c->p.x = lhs->body.pos.x * wr1 + rhs->body.pos.x * wr2;
+    c->p.y = lhs->body.pos.y * wr1 + rhs->body.pos.y * wr2;
+    c->p.z = lhs->body.pos.z * wr1 + rhs->body.pos.z * wr2;
 
     c->obj1 = PP_BODY(lhs);
     c->obj2 = PP_BODY(rhs);
@@ -1626,16 +1633,20 @@ void pp_fill_collision_info_sphere_sphere(const PPSphere *lhs,
     c->kind2 = rhs->body.kind;
 }
 
-void pp_fill_collision_info_sphere_triangle(
+static inline void pp_fill_collision_info_sphere_triangle(
     const PPSphere *lhs, const PPTriangle *tri, const PPVec3 *p, float dist, PPCollision *c)
 {
-    pp_vec3_scale(&tri->n, -1.0f, &c->n);
-    pp_vec3_scale(p, 1.0f, &c->p); // Copy
+    c->n.x = -tri->n.x;
+    c->n.y = -tri->n.y;
+    c->n.z = -tri->n.z;
+    c->p.x = p->x;
+    c->p.y = p->y;
+    c->p.z = p->z;
     c->dist = dist;
     c->obj1 = PP_BODY(lhs);
     c->obj2 = &trimesh_body;
     c->obj1_bounce = c->obj1->bounce;
-    c->obj2_bounce = 0.0f; // FIXME
+    c->obj2_bounce = 0.0f;
     c->obj1_friction = c->obj1->friction;
     c->obj2_friction = tri->friction;
     c->type1 = PP_OBJECT_TYPE_SPHERE;
@@ -1741,6 +1752,14 @@ PPTriangle *pp_physics_create_triangle(const PPVec3 *v1,
     tri->friction = 0.9f;
     tri->kind = kind;
 
+    // Precompute AABB for fast sphere culling
+    tri->aabb_min_x = fminf(v1->x, fminf(v2->x, v3->x));
+    tri->aabb_min_y = fminf(v1->y, fminf(v2->y, v3->y));
+    tri->aabb_min_z = fminf(v1->z, fminf(v2->z, v3->z));
+    tri->aabb_max_x = fmaxf(v1->x, fmaxf(v2->x, v3->x));
+    tri->aabb_max_y = fmaxf(v1->y, fmaxf(v2->y, v3->y));
+    tri->aabb_max_z = fmaxf(v1->z, fmaxf(v2->z, v3->z));
+
     return tri;
 }
 
@@ -1824,8 +1843,8 @@ static void pp_integrate_forces(float t)
         pp_vec3_add(&body->vel, &scaled_vel, &body->vel);
         pp_vec3_init(&body->acc);
 
-        // Apply linear damping
-        float damp = expf(-body->damping * t);
+        // Apply linear damping (linear approximation of exp(-x) ≈ 1-x for small x)
+        float damp = 1.0f - body->damping * t;
         pp_vec3_scale(&body->vel, damp, &body->vel);
 
         if (body->lock) {
@@ -1849,8 +1868,8 @@ static void pp_integrate_forces(float t)
         pp_vec3_scale(&body->a_acc, t, &scaled_ang_vel);
         pp_vec3_add(&body->a_vel, &scaled_ang_vel, &body->a_vel);
 
-        // Apply angular damping if desired
-        float a_damp = expf(-body->a_damping * t);
+        // Apply angular damping (linear approximation of exp(-x) ≈ 1-x for small x)
+        float a_damp = 1.0f - body->a_damping * t;
         pp_vec3_scale(&body->a_vel, a_damp, &body->a_vel);
 
         // Reset the acceleration
@@ -2064,10 +2083,10 @@ static void pp_solve_velocities(const PPCollision *manifold)
     }
 
     // Moving towards each other
-    float r = fmax(manifold->obj1_bounce, manifold->obj2_bounce);
+    float r = fmaxf(manifold->obj1_bounce, manifold->obj2_bounce);
 
     const float bounce_threshold = 0.1f;
-    if (fabs(vel_along_normal) < bounce_threshold) {
+    if (fabsf(vel_along_normal) < bounce_threshold) {
         // If we're not moving, then don't add bounce!
         r = 0.0f;
     }
@@ -2092,7 +2111,7 @@ static void pp_solve_velocities(const PPCollision *manifold)
     float angular_term = pp_vec3_dot(&lhs_angular_term, n) + pp_vec3_dot(&rhs_angular_term, n);
     float denominator = linear_term + angular_term;
 
-    if (fabs(denominator) < 1e-8f) {
+    if (fabsf(denominator) < 1e-8f) {
         // Prevent divide by zero
         return;
     }
@@ -2609,8 +2628,9 @@ void pp_polytope_push_edge(PPPolytope *polytope, uint8_t a, uint8_t b)
 
 static inline void pp_vec3_average(const PPVec3 *a, const PPVec3 *b, const PPVec3 *c, PPVec3 *out)
 {
+    const float one_third = 1.0f / 3.0f;
     for (int i = 0; i < 3; ++i) {
-        out->xyz[i] = (a->xyz[i] + b->xyz[i] + c->xyz[i]) / 3;
+        out->xyz[i] = (a->xyz[i] + b->xyz[i] + c->xyz[i]) * one_third;
     }
 }
 
@@ -2754,7 +2774,9 @@ bool pp_epa(PPSimplex *simplex,
     const PPSupportPoint *c = pp_simplex_at(simplex, 2);
     const PPSupportPoint *d = pp_simplex_at(simplex, 3);
 
-    PPPolytope polytope = {.faces = {}, .face_count = 0, .edge_count = 0};
+    static PPPolytope polytope;
+    polytope.face_count = 0;
+    polytope.edge_count = 0;
 
     polytope.point_count = 4;
     memcpy(&polytope.points[0], a, sizeof(PPSupportPoint));
@@ -2882,52 +2904,38 @@ static inline bool flt_close(const float a, const float b)
 bool pp_sphere_box_intersect(
     const PPSphere *lhs, const PPBox *rhs, PPVec3 *contact_point, PPVec3 *n, float *intersection)
 {
+    // Early-out: bounding sphere check (cheap squared distance)
     PPVec3 diff;
     pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &diff);
-
     float diff_dist_sq = pp_vec3_dot(&diff, &diff);
-    float sphere_radius = lhs->radius;
-    float box_radius = rhs->radius;
-
-    if (diff_dist_sq > (sphere_radius + box_radius) * (sphere_radius + box_radius)) {
+    float sum_radius = lhs->radius + rhs->radius;
+    if (diff_dist_sq > sum_radius * sum_radius) {
         return false;
     }
 
+    // Transform sphere center to box local space
     PPVec3 sphere_center_local;
-    PPVec3 box_center = rhs->body.pos;
-    PPVec3 sphere_center = lhs->body.pos;
     PPVec3 tmp;
-    pp_vec3_sub(&sphere_center, &box_center, &tmp);
+    pp_vec3_sub(&lhs->body.pos, &rhs->body.pos, &tmp);
 
-    // Inverse rotate by box orientation
-    PPQuaternion box_rot = rhs->body.rot;
-    PPQuaternion box_rot_inv = box_rot;
-    box_rot_inv.x = -box_rot.x;
-    box_rot_inv.y = -box_rot.y;
-    box_rot_inv.z = -box_rot.z;
-
+    PPQuaternion box_rot_inv;
+    pp_quat_conjugate(&rhs->body.rot, &box_rot_inv);
     pp_quat_transform(&box_rot_inv, &tmp, &sphere_center_local);
 
-    // Clamp sphere center to box extents (local space)
-    PPVec3 half_extents = {.xyz={rhs->whd.x * 0.5f, rhs->whd.y * 0.5f, rhs->whd.z * 0.5f}};
-    PPVec3 closest_local = sphere_center_local;
-    if (closest_local.x < -half_extents.x)
-        closest_local.x = -half_extents.x;
-    if (closest_local.x > half_extents.x)
-        closest_local.x = half_extents.x;
-    if (closest_local.y < -half_extents.y)
-        closest_local.y = -half_extents.y;
-    if (closest_local.y > half_extents.y)
-        closest_local.y = half_extents.y;
-    if (closest_local.z < -half_extents.z)
-        closest_local.z = -half_extents.z;
-    if (closest_local.z > half_extents.z)
-        closest_local.z = half_extents.z;
+    // Clamp to box half_extents (local space)
+    float hx = rhs->half_extents.x, hy = rhs->half_extents.y, hz = rhs->half_extents.z;
+    float cx = sphere_center_local.x;
+    float cy = sphere_center_local.y;
+    float cz = sphere_center_local.z;
+    if (cx < -hx) cx = -hx; else if (cx > hx) cx = hx;
+    if (cy < -hy) cy = -hy; else if (cy > hy) cy = hy;
+    if (cz < -hz) cz = -hz; else if (cz > hz) cz = hz;
 
-    // Compute vector from closest point to sphere center (local space)
-    PPVec3 delta_local;
-    pp_vec3_sub(&sphere_center_local, &closest_local, &delta_local);
-    float dist_sq = pp_vec3_dot(&delta_local, &delta_local);
+    // Delta from closest point to sphere center (local space)
+    float dx = sphere_center_local.x - cx;
+    float dy = sphere_center_local.y - cy;
+    float dz = sphere_center_local.z - cz;
+    float dist_sq = dx*dx + dy*dy + dz*dz;
     float radius = lhs->radius;
 
     if (dist_sq > radius * radius) {
@@ -2936,7 +2944,8 @@ bool pp_sphere_box_intersect(
 
     // Transform contact point back to world space
     PPVec3 contact_world;
-    pp_quat_transform(&rhs->body.rot, &closest_local, &contact_world);
+    pp_vec3_set(&sphere_center_local, cx, cy, cz);
+    pp_quat_transform(&rhs->body.rot, &sphere_center_local, &contact_world);
     pp_vec3_add(&contact_world, &rhs->body.pos, contact_point);
 
     // Penetration depth
@@ -2948,14 +2957,13 @@ bool pp_sphere_box_intersect(
     if (n) {
         PPVec3 normal_local;
         if (dist > 1e-6f) {
-            pp_vec3_scale(&delta_local, -1.0f / dist, &normal_local);
+            float inv_dist = -1.0f / dist;
+            pp_vec3_set(&normal_local, dx * inv_dist, dy * inv_dist, dz * inv_dist);
         } else {
-            // Sphere center is inside box, pick arbitrary normal (e.g., x axis)
+            // Sphere center is inside box
             pp_vec3_set(&normal_local, -1.0f, 0.0f, 0.0f);
         }
-        // Rotate normal to world space
         pp_quat_transform(&rhs->body.rot, &normal_local, n);
-        pp_vec3_normalize(n);
     }
 
     return true;
@@ -3033,7 +3041,7 @@ static void pp_solve_positions(const PPCollision *manifold)
 void pp_physics_step(float t, int vel_iterations, int pos_iterations)
 {
     int manifold_count = 0;
-    PPCollision manifolds[PICOPHYSICS_MAX_MANIFOLDS];
+    static PPCollision manifolds[PICOPHYSICS_MAX_MANIFOLDS];
 
     for (int i = 0; i < object_count; ++i) {
         // Check collision between bodies
@@ -3054,34 +3062,32 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
         // Solve sphere/triangle first (as we're not yet an iterative solver)
         if (lhs_sphere) {
             int last_kind = -1;
+            float radius = lhs_sphere->radius;
+            float radius_sq = radius * radius;
+            float pos_x = lhs_body->pos.x;
+            float pos_y = lhs_body->pos.y;
+            float pos_z = lhs_body->pos.z;
+
             for (int j = 0; j < tri_count; ++j) {
                 const PPTriangle *tri = tris + j;
 
-                // Quick AABB or sphere check first
-                float max_x = fmaxf(fmaxf(tri->v[0].x, tri->v[1].x), tri->v[2].x);
-                float min_x = fminf(fminf(tri->v[0].x, tri->v[1].x), tri->v[2].x);
-                float max_y = fmaxf(fmaxf(tri->v[0].y, tri->v[1].y), tri->v[2].y);
-                float min_y = fminf(fminf(tri->v[0].y, tri->v[1].y), tri->v[2].y);
-                float max_z = fmaxf(fmaxf(tri->v[0].z, tri->v[1].z), tri->v[2].z);
-                float min_z = fminf(fminf(tri->v[0].z, tri->v[1].z), tri->v[2].z);
-
-                // Check if sphere bounds overlap with triangle AABB
-                float dx = fmaxf(0.0f, fmaxf(min_x - lhs_body->pos.x, lhs_body->pos.x - max_x));
-                float dy = fmaxf(0.0f, fmaxf(min_y - lhs_body->pos.y, lhs_body->pos.y - max_y));
-                float dz = fmaxf(0.0f, fmaxf(min_z - lhs_body->pos.z, lhs_body->pos.z - max_z));
+                // Use precomputed AABB — zero per-frame cost
+                float dx = fmaxf(0.0f, fmaxf(tri->aabb_min_x - pos_x, pos_x - tri->aabb_max_x));
+                float dy = fmaxf(0.0f, fmaxf(tri->aabb_min_y - pos_y, pos_y - tri->aabb_max_y));
+                float dz = fmaxf(0.0f, fmaxf(tri->aabb_min_z - pos_z, pos_z - tri->aabb_max_z));
 
                 float dist_sq = dx*dx + dy*dy + dz*dz;
-                if (dist_sq > lhs_sphere->radius * lhs_sphere->radius) {
-                    continue; // Skip expensive ray-cast
+                if (dist_sq > radius_sq) {
+                    continue;
                 }
 
+                // Check collision callback BEFORE expensive intersect test
                 if(tri->kind != last_kind) {
                     last_kind = tri->kind;
                     cb = pp_physics_collision_map_search(lhs_body->kind, tri->kind);
                 }
 
                 if(cb && !cb->collision_callback) {
-                    // Explicit ignore - we don't even do the intersection here
                     continue;
                 }
 
@@ -3089,12 +3095,12 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                 pp_vec3_scale(&tri->n, -1.0f, &d);
                 float dist;
                 if (pp_tri_intersect(tri, &lhs_body->pos, &d, &p, &dist)) {
-                    if (dist <= lhs_sphere->radius) {
+                    if (dist <= radius) {
                         PPCollision c;
                         pp_fill_collision_info_sphere_triangle(lhs_sphere,
                                                                tri,
                                                                &p,
-                                                               lhs_sphere->radius - dist,
+                                                               radius - dist,
                                                                &c);
 
                         bool respond = true;
@@ -3137,8 +3143,10 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                     continue;
                 }
 
-                float dist = pp_vec3_dist(&lhs_sphere->body.pos, &rhs_sphere->body.pos);
-                if (dist <= (lhs_sphere->radius + rhs_sphere->radius)) {
+                float dist = pp_vec3_dist_sq(&lhs_sphere->body.pos, &rhs_sphere->body.pos);
+                float radius_sum = lhs_sphere->radius + rhs_sphere->radius;
+                if (dist <= (radius_sum * radius_sum)) {
+                    dist = sqrtf(dist);
                     PPCollision c;
                     pp_fill_collision_info_sphere_sphere(lhs_sphere, rhs_sphere, dist, &c);
 
