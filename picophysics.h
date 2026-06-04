@@ -206,7 +206,15 @@ typedef struct _PPCollision
     BodyKind kind1;
     BodyKind kind2;
 
-    float dist; // Distance between object CoM
+    float dist; // Penetration depth (positive when overlapping)
+
+    // Signed gap between the two surfaces: negative when penetrating, positive
+    // when there is still a gap. A positive value indicates a *speculative*
+    // contact -- the bodies are not touching yet but are predicted to make
+    // contact within the current step. The velocity solver uses this to brake
+    // an approaching body so it closes the gap without overshooting (passing
+    // through), which is what prevents fast movers from tunnelling.
+    float separation;
 } PPCollision;
 
 typedef enum _PPAxisLock {
@@ -1626,6 +1634,7 @@ static inline void pp_fill_collision_info_sphere_box(PPBody *lhs_body,
                                        float d)
 {
     c->dist = d;
+    c->separation = -d; // only reported while overlapping, so never speculative
     c->p.x = contact_point->x; c->p.y = contact_point->y; c->p.z = contact_point->z;
     c->n.x = n->x; c->n.y = n->y; c->n.z = n->z;
     c->obj1 = lhs_body;
@@ -1654,6 +1663,7 @@ static inline void pp_fill_collision_info_sphere_sphere(PPBody *lhs_body,
     c->n.y = rhs_pos->y - lhs_pos->y;
     c->n.z = rhs_pos->z - lhs_pos->z;
     c->dist = dist - total_radius;
+    c->separation = dist - total_radius; // only reported while overlapping
     if (dist > 0) {
         float inv = 1.0f / dist;
         c->n.x *= inv; c->n.y *= inv; c->n.z *= inv;
@@ -1688,6 +1698,7 @@ static inline void pp_fill_collision_info_sphere_triangle(
     c->p.y = p->y;
     c->p.z = p->z;
     c->dist = dist;
+    c->separation = -dist; // dist is penetration (radius - perp distance)
     c->obj1 = lhs_body;
     c->obj2 = &trimesh_body;
     c->obj1_bounce = lhs_body->bounce;
@@ -2064,7 +2075,7 @@ static void pp_solve_constraint_positions(PPConstraint *entry, float dt)
     }
 }
 
-static void pp_solve_velocities(const PPCollision *manifold)
+static void pp_solve_velocities(const PPCollision *manifold, float t)
 {
     PPBody *lhs = manifold->obj1;
     PPBody *rhs = manifold->obj2;
@@ -2110,9 +2121,14 @@ static void pp_solve_velocities(const PPCollision *manifold)
     float vel_along_normal;
     vel_along_normal = pp_vec3_dot(&rel_vel, n);
 
-    if (vel_along_normal > 0.0f) {
-        return;
-    }
+    // Speculative contact bias. When there is still a gap (separation > 0) the
+    // bodies are not touching yet, but were predicted to make contact this
+    // step. Rather than zeroing the approach velocity (which would freeze the
+    // body short of the surface), we permit it to approach just fast enough to
+    // close the gap in exactly one step: allowed = separation / t. The solver
+    // then only removes the velocity *in excess* of that, so a fast mover is
+    // braked to land on the surface instead of passing through it.
+    float allowed = (manifold->separation > 0.0f) ? (manifold->separation / t) : 0.0f;
 
     // Moving towards each other
     float r = fmaxf(manifold->obj1_bounce, manifold->obj2_bounce);
@@ -2123,7 +2139,16 @@ static void pp_solve_velocities(const PPCollision *manifold)
         r = 0.0f;
     }
 
-    float numerator = -(1.0f + r) * vel_along_normal;
+    if (manifold->separation > 0.0f) {
+        // Don't bounce off a gap; restitution only applies on real contact.
+        r = 0.0f;
+    }
+
+    // Target: vel_along_normal should end at >= -allowed. The required impulse
+    // (numerator) is positive only when the body approaches faster than the
+    // gap permits; the clamp below discards the negative (separating) case,
+    // which is why no explicit "moving apart" early-out is needed here.
+    float numerator = -(1.0f + r) * vel_along_normal - allowed;
     float linear_term = inv_mass_sum;
 
     // rhs_pcp might be zero here, but that's fine as it'll cause
@@ -3108,10 +3133,17 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
             pp_shape_world_pos(lhs_body, lhs_shape, &shape_pos);
 
             float radius = lhs_shape->sphere.radius;
-            float radius_sq = radius * radius;
             float pos_x = shape_pos.x;
             float pos_y = shape_pos.y;
             float pos_z = shape_pos.z;
+
+            // Expand the broadphase by the distance the sphere may travel this
+            // step. A fast mover that the static radius check would cull is
+            // still considered, so it can be caught speculatively before it
+            // tunnels through a triangle.
+            float speed = pp_vec3_length(&lhs_body->vel);
+            float reach = radius + speed * t;
+            float reach_sq = reach * reach;
 
             int last_kind = -1;
             for (int j = 0; j < tri_count; ++j) {
@@ -3122,7 +3154,7 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                 float dz = fmaxf(0.0f, fmaxf(tri->aabb_min_z - pos_z, pos_z - tri->aabb_max_z));
 
                 float dist_sq = dx*dx + dy*dy + dz*dz;
-                if (dist_sq > radius_sq) {
+                if (dist_sq > reach_sq) {
                     continue;
                 }
 
@@ -3137,9 +3169,28 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
 
                 PPVec3 p, d;
                 pp_vec3_scale(&tri->n, -1.0f, &d);
-                float dist;
+                float dist; // perpendicular distance from sphere centre to plane
                 if (pp_tri_intersect(tri, &shape_pos, &d, &p, &dist)) {
-                    if (dist <= radius) {
+                    float separation = dist - radius;
+
+                    // Decide whether to register a contact this step. Either the
+                    // sphere is already touching/penetrating, or it has a gap but
+                    // is approaching fast enough to close it within this step --
+                    // a speculative contact, which is what stops fast spheres
+                    // tunnelling straight through the triangle.
+                    bool contact = false;
+                    if (separation <= 0.0f) {
+                        contact = true;
+                    } else {
+                        // Approach speed is the velocity component heading into
+                        // the front face of the triangle.
+                        float approach = -pp_vec3_dot(&lhs_body->vel, &tri->n);
+                        if (approach > 0.0f && separation <= approach * t) {
+                            contact = true;
+                        }
+                    }
+
+                    if (contact) {
                         PPCollision c;
                         pp_fill_collision_info_sphere_triangle(lhs_body, lhs_shape,
                                                                tri,
@@ -3272,6 +3323,7 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                                 c.p = contact;
                                 c.n = n;
                                 c.dist = depth;
+                                c.separation = -depth; // only reported while overlapping
                                 c.obj1 = lhs_body;
                                 c.obj2 = rhs_body;
                                 c.obj1_bounce = lhs_body->bounce;
@@ -3307,7 +3359,7 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
 
     for (int j = 0; j < vel_iterations; ++j) {
         for (int i = 0; i < manifold_count; ++i) {
-            pp_solve_velocities(&manifolds[i]);
+            pp_solve_velocities(&manifolds[i], t);
         }
 
         for(int i = 0; i < constraint_count; ++i) {
