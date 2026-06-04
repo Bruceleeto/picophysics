@@ -93,16 +93,16 @@ int main(int argc, char* argv[]) {
     pp_vec3_set(&p1, -0.5f, 0.0f, 0.0f);
     pp_vec3_set(&p2, 0.5f, 0.0f, 0.0f);
 
-    PPSphere* lhs = pp_physics_create_sphere(1.0f, &p1, 1, 0);
-    PPSphere* rhs = pp_physics_create_sphere(1.0f, &p2, 1, 0);
+    PPBody* lhs = pp_physics_create_sphere(1.0f, &p1, 1, 0);
+    PPBody* rhs = pp_physics_create_sphere(1.0f, &p2, 1, 0);
 
     pp_physics_step(1.0f / 60.0f, 8, 3);
 
-    CHECK(lhs->body.pos.xyz[0] == -0.5f, "Unexpected position\n");
-    CHECK(rhs->body.pos.xyz[0] == 0.5f, "Unexpected position\n");
+    CHECK(lhs->pos.xyz[0] == -0.5f, "Unexpected position\n");
+    CHECK(rhs->pos.xyz[0] == 0.5f, "Unexpected position\n");
 
-    pp_physics_destroy_body(PP_BODY(rhs));
-    CHECK(rhs->body.is_alive == false, "Sphere unexpectedly alive\n");
+    pp_physics_destroy_body(rhs);
+    CHECK(rhs->is_alive == false, "Sphere unexpectedly alive\n");
 
     PPVec3 v3;
 
@@ -110,13 +110,13 @@ int main(int argc, char* argv[]) {
     pp_vec3_set(&v2, 0, 0, 10);
     pp_vec3_set(&v3, 10, 0, -10);
 
-    pp_vec3_set(&lhs->body.pos, 0.0f, 0.5f, 0.0f);
+    pp_vec3_set(&lhs->pos, 0.0f, 0.5f, 0.0f);
 
     pp_physics_create_triangle(&v1, &v2, &v3, 0);
 
     pp_physics_step(1.0f / 60.0f, 8, 3);
 
-    CHECK(lhs->body.pos.xyz[1] > 0.5f, "Body position didn't move\n");
+    CHECK(lhs->pos.xyz[1] > 0.5f, "Body position didn't move\n");
 
     const PPTriangle* ct;
     const PPBody* cs;
@@ -130,7 +130,7 @@ int main(int argc, char* argv[]) {
 
     CHECK(pp_physics_body_count() == 2, "Incorrect sphere count");
     CHECK(pp_physics_body_total_count() == 2, "Incorrect sphere count");
-    pp_physics_destroy_body(PP_BODY(lhs));
+    pp_physics_destroy_body(lhs);
     CHECK(pp_physics_body_count() == 1, "Incorrect sphere count");
     CHECK(pp_physics_body_total_count() == 2, "Incorrect sphere count");
     lhs = pp_physics_create_sphere(1.0f, &p1, 1, 0);
@@ -140,30 +140,30 @@ int main(int argc, char* argv[]) {
     // Reset
     pp_physics_clear();
 
-    PPBox* b1 = pp_physics_create_box(1.0f, 1.0f, 1.0f, &p1, 1.0f, 0);
-    PPSphere* s1 = pp_physics_create_sphere(1.0f, &p2, 1, 0);
+    PPBody* b1 = pp_physics_create_box(1.0f, 1.0f, 1.0f, &p1, 1.0f, 0);
+    PPBody* s1 = pp_physics_create_sphere(1.0f, &p2, 1, 0);
 
     pp_physics_step(1.0f / 60.0f, 8, 3);
 
-    fprintf(stderr, "Position of b1: %f, %f, %f\n", b1->body.pos.xyz[0], b1->body.pos.xyz[1], b1->body.pos.xyz[2]);
-    fprintf(stderr, "Position of s1: %f, %f, %f\n", s1->body.pos.xyz[0], s1->body.pos.xyz[1], s1->body.pos.xyz[2]);
+    fprintf(stderr, "Position of b1: %f, %f, %f\n", b1->pos.xyz[0], b1->pos.xyz[1], b1->pos.xyz[2]);
+    fprintf(stderr, "Position of s1: %f, %f, %f\n", s1->pos.xyz[0], s1->pos.xyz[1], s1->pos.xyz[2]);
 
-    CHECK(b1->body.pos.xyz[0] < -0.5f, "Unexpected position\n");  // Boxes don't move
-    CHECK(s1->body.pos.xyz[0] > 0.5f, "Unexpected position\n");
+    CHECK(b1->pos.xyz[0] < -0.5f, "Unexpected position\n");
+    CHECK(s1->pos.xyz[0] > 0.5f, "Unexpected position\n");
 
-    pp_body_set_position(PP_BODY(b1), p2.x, p2.y, p2.z);
-    pp_body_set_position(PP_BODY(s1), p1.x, p1.y, p1.z);
+    pp_body_set_position(b1, p2.x, p2.y, p2.z);
+    pp_body_set_position(s1, p1.x, p1.y, p1.z);
 
     pp_physics_step(1.0f / 60.0f, 8, 3);
 
-    CHECK(b1->body.pos.xyz[0] > 0.5f, "Unexpected position\n");  // Boxes don't move
-    CHECK(s1->body.pos.xyz[0] < -0.5f, "Unexpected position\n");
+    CHECK(b1->pos.xyz[0] > 0.5f, "Unexpected position\n");
+    CHECK(s1->pos.xyz[0] < -0.5f, "Unexpected position\n");
 
     // Ray intersections
     pp_physics_clear();
 
     PPVec3 ray_box_pos = {.xyz={0, 0, 0}};
-    PPBox* ray_box = pp_physics_create_box(1.0f, 1.0f, 1.0f, &ray_box_pos, 1.0f, 0);
+    PPBody* ray_box = pp_physics_create_box(1.0f, 1.0f, 1.0f, &ray_box_pos, 1.0f, 0);
 
     PPVec3 ro2 = {.xyz = {0, 0, 5}};
     PPVec3 rd2 = {.xyz = {0, 0, -1}};
@@ -175,7 +175,7 @@ int main(int argc, char* argv[]) {
     CHECK(pp_physics_ray_intersect(&ro2, &rd2, NULL, &hit, &tri_hit, &ray_dist, &intersection), "Ray intersection failed\n");
 
     // Check hit body and triangle
-    CHECK(hit == PP_BODY(ray_box), "Unexpected hit body\n");
+    CHECK(hit == ray_box, "Unexpected hit body\n");
     CHECK(tri_hit == NULL, "Unexpected hit triangle\n");
     CHECK(ray_dist == 4.5f, "Unexpected distance\n");
     CHECK(CLOSE(intersection.x, ray_box_pos.x), "Unexpected intersection x\n");
@@ -190,13 +190,13 @@ int main(int argc, char* argv[]) {
     CHECK(CLOSE(intersection.y, ray_box_pos.y), "Unexpected intersection y\n");
     CHECK(CLOSE(intersection.z, ray_box_pos.z + 0.5f), "Unexpected intersection z\n");
 
-    pp_body_set_kind(PP_BODY(ray_box), 1);
+    pp_body_set_kind(ray_box, 1);
 
-    BodyKind ignore_list [] = {ray_box->body.kind, 0};
+    BodyKind ignore_list [] = {pp_body_get_kind(ray_box), 0};
     CHECK(!pp_physics_ray_intersect(&ro2, &rd2, ignore_list, &hit, &tri_hit, &ray_dist, &intersection), "Unexpected intersection\n");
 
     PPQuaternion yaw45 = {.xyzw={0.924f, 0.0f, 0.0f, 0.383f}};
-    pp_body_set_rotation(PP_BODY(ray_box), yaw45.x, yaw45.y, yaw45.z, yaw45.w);
+    pp_body_set_rotation(ray_box, yaw45.x, yaw45.y, yaw45.z, yaw45.w);
 
     // Check mat3_inverse
     PPMat3 I = { .m = {1,0,0, 0,1,0, 0,0,1} };
@@ -210,8 +210,8 @@ int main(int argc, char* argv[]) {
     CHECK(CLOSE(I.m[4], 1), "Unexpected value");
     CHECK(CLOSE(I.m[5], 0), "Unexpected value");
 
-    PPBody* cb1 = PP_BODY(pp_physics_create_sphere(0.5f, NULL, 1.0f, 1));
-    PPBody* cb2 = PP_BODY(pp_physics_create_sphere(0.5f, NULL, 1.0f, 1));
+    PPBody* cb1 = pp_physics_create_sphere(0.5f, NULL, 1.0f, 1);
+    PPBody* cb2 = pp_physics_create_sphere(0.5f, NULL, 1.0f, 1);
 
     PPConstraint* c = pp_physics_create_fixed_distance_constraint(cb1, cb2, 1.0f);
 
