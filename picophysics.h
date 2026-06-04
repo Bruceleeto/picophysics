@@ -6,13 +6,11 @@
  * for the N64 port of the Dreamcast game Driving Strikers, where every cycle counts and I needed
  * full control and understanding of what was happening.
  *
- * Picophysics isn't just small, but it's conceptually simple.
- *
  * # Features
  *
  * - Composite bodies made of multiple sphere and box shapes with local offsets
  * - Create fully dynamic spheres and boxes and apply linear and angular forces
- * - Create environments using triangles
+ * - Create static environments using triangles
  * - Easy to use collision callback system to respond to detected collisions and to
  *   choose whether to respond at at all (return true to respond)
  * - Ray casting
