@@ -307,6 +307,25 @@ PPVec3 *pp_vec3_set(PPVec3 *v, float x, float y, float z);
 PPVec3 *pp_vec3_assign(PPVec3 *target, const PPVec3 *source);
 bool pp_vec3_normalize(PPVec3 *target);
 
+static inline float pp_vec3_length(const PPVec3 *v1)
+{
+    return sqrtf(v1->x * v1->x + v1->y * v1->y + v1->z * v1->z);
+}
+
+static inline float pp_vec3_dot(const PPVec3 *v1, const PPVec3 *v2)
+{
+    return v1->x * v2->x + v1->y * v2->y + v1->z * v2->z;
+}
+
+static inline PPVec3 *pp_vec3_scale(const PPVec3 *v1, float t, PPVec3 *out)
+{
+    out->x = v1->x * t;
+    out->y = v1->y * t;
+    out->z = v1->z * t;
+    return out;
+}
+
+
 PPQuaternion *pp_quat_init(PPQuaternion *q);
 void pp_quat_between(const PPVec3 *v0, const PPVec3 *q1, PPQuaternion *result);
 void pp_quat_slerp(const PPQuaternion *q0, const PPQuaternion *q1, float t, PPQuaternion *result);
@@ -512,25 +531,12 @@ static inline PPVec3 *pp_vec3_sub(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *ou
     return out;
 }
 
-static inline PPVec3 *pp_vec3_scale(const PPVec3 *v1, float t, PPVec3 *out)
-{
-    out->x = v1->x * t;
-    out->y = v1->y * t;
-    out->z = v1->z * t;
-    return out;
-}
-
 static inline PPVec3 *pp_vec3_neg(const PPVec3 *v1, PPVec3 *out)
 {
     out->x = -v1->x;
     out->y = -v1->y;
     out->z = -v1->z;
     return out;
-}
-
-static inline float pp_vec3_length(const PPVec3 *v1)
-{
-    return sqrtf(v1->x * v1->x + v1->y * v1->y + v1->z * v1->z);
 }
 
 static inline float pp_vec3_length_sq(const PPVec3 *v1)
@@ -561,11 +567,6 @@ static inline PPVec3 *pp_vec3_cross(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *
     out->y = v1->z * v2->x - v1->x * v2->z;
     out->z = v1->x * v2->y - v1->y * v2->x;
     return out;
-}
-
-static inline float pp_vec3_dot(const PPVec3 *v1, const PPVec3 *v2)
-{
-    return v1->x * v2->x + v1->y * v2->y + v1->z * v2->z;
 }
 
 bool pp_vec3_normalize(PPVec3 *v)
@@ -2872,82 +2873,99 @@ bool pp_epa(PPSimplex *simplex,
         return false;
     }
 
-    const int MAX_ITERATIONS = 10;
+    const int MAX_ITERATIONS = 32;
 
-    PPPolytopeFace *min_face_ptr = NULL;
-    for (int i = 0; i < MAX_ITERATIONS; ++i) {
-        min_face_ptr = &polytope.faces[min_face];
+    for (int iter = 0; iter < MAX_ITERATIONS; ++iter) {
+        // Always pick the genuinely closest face by scanning all of them.
+        // Tracking this index incrementally is unsafe: pp_polytope_erase_face
+        // swaps the last face into the erased slot, so any stored index or
+        // pointer goes stale mid-expansion. That stale index was the root of
+        // EPA reporting the depth of a *far* face (the huge push-apart we saw)
+        // and of the runaway expansion that overflowed the face budget.
+        min_face = pp_find_min_face(&polytope);
+        PPVec3 face_n = polytope.faces[min_face].n;
+        float face_d = polytope.faces[min_face].d;
 
 #if EPA_DEBUG
         char filename[100];
-        sprintf(filename, "%d.obj", i);
+        sprintf(filename, "%d.obj", iter);
         pp_polytope_write(&polytope, filename);
 #endif
 
         PPSupportPoint support;
-        bool ok = pp_gjk_support(lhs, rhs, &min_face_ptr->n, &support);
-        assert(ok);
-        if (!ok) {
-            continue;
+        if (!pp_gjk_support(lhs, rhs, &face_n, &support)) {
+            break;
         }
 
-        float s_dist = pp_vec3_dot(&support.point, &min_face_ptr->n);
+        float s_dist = pp_vec3_dot(&support.point, &face_n);
 
-        // If the support point is further from the origin than the
-        // current min face, then we need to expand the polytope
-        bool expand = s_dist > min_face_ptr->d + 0.001f;
-        if (expand) {
-            pp_polytope_clear_edges(&polytope);
+        // Converged: the support point in the closest-face direction is no
+        // further out than that face, so the face lies on the Minkowski hull.
+        if (s_dist - face_d < 0.001f) {
+            break;
+        }
 
-            for (size_t i = 0; i < polytope.face_count; ++i) {
-                PPVec3 dir;
-                pp_vec3_sub(&support.point, &polytope.points[polytope.faces[i].a].point, &dir);
+        // Expand the polytope toward the new support point: remove every face
+        // it can "see", record the horizon edges, then fan the horizon to the
+        // new vertex.
+        pp_polytope_clear_edges(&polytope);
 
-                if (pp_same_direction(&polytope.faces[i].n, &dir)) {
-                    assert(polytope.faces[i].a != polytope.faces[i].b);
-                    assert(polytope.faces[i].a != polytope.faces[i].c);
+        bool edge_budget_hit = false;
+        for (size_t i = 0; i < polytope.face_count; ++i) {
+            PPVec3 dir;
+            pp_vec3_sub(&support.point, &polytope.points[polytope.faces[i].a].point, &dir);
 
-                    pp_polytope_push_edge(&polytope, polytope.faces[i].a, polytope.faces[i].b);
-                    pp_polytope_push_edge(&polytope, polytope.faces[i].b, polytope.faces[i].c);
-                    pp_polytope_push_edge(&polytope, polytope.faces[i].c, polytope.faces[i].a);
-
-                    pp_polytope_erase_face(&polytope, i);
-
-                    --i;
+            if (pp_same_direction(&polytope.faces[i].n, &dir)) {
+                // Each face contributes three horizon edges; bail out cleanly
+                // rather than overrunning the edge buffer on a complex horizon.
+                if (polytope.edge_count + 3 > MAX_POLYTOPE_EDGES) {
+                    edge_budget_hit = true;
+                    break;
                 }
-            }
 
-            if (!polytope.edge_count) {
-                fprintf(stderr, "No edges found\n");
+                pp_polytope_push_edge(&polytope, polytope.faces[i].a, polytope.faces[i].b);
+                pp_polytope_push_edge(&polytope, polytope.faces[i].b, polytope.faces[i].c);
+                pp_polytope_push_edge(&polytope, polytope.faces[i].c, polytope.faces[i].a);
+
+                pp_polytope_erase_face(&polytope, i);
+
+                --i;
+            }
+        }
+
+        if (edge_budget_hit || !polytope.edge_count) {
+            break;
+        }
+
+        if (polytope.point_count >= MAX_POLYTOPE_POINTS) {
+            break; // out of vertex budget; use the best face found so far
+        }
+
+        uint8_t new_point_index = (uint8_t) polytope.point_count;
+        memcpy(&polytope.points[polytope.point_count++], &support, sizeof(PPSupportPoint));
+
+        bool face_budget_hit = false;
+        for (size_t i = 0; i < polytope.edge_count; ++i) {
+            if (polytope.face_count >= MAX_POLYTOPE_FACES - 1) {
+                face_budget_hit = true;
                 break;
             }
 
-            size_t new_point_index = polytope.point_count;
+            pp_polytope_push_face(&polytope,
+                                  polytope.edges[i].a,
+                                  polytope.edges[i].b,
+                                  new_point_index);
+        }
 
-            memcpy(&polytope.points[polytope.point_count++], &support, sizeof(PPSupportPoint));
-
-            for (size_t i = 0; i < polytope.edge_count; ++i) {
-                assert(polytope.edges[i].a != new_point_index);
-                assert(polytope.edges[i].a != polytope.edges[i].b);
-
-                float d = pp_polytope_push_face(&polytope,
-                                                polytope.edges[i].a,
-                                                polytope.edges[i].b,
-                                                new_point_index);
-
-                if (d < (min_face_ptr->d - 0.001f)) {
-                    min_face = polytope.face_count - 1;
-                    min_face_ptr = &polytope.faces[min_face];
-                }
-            }
-        } else {
+        if (face_budget_hit) {
             break;
         }
     }
 
-    if (!min_face_ptr) {
-        return false;
-    }
+    // Recompute the closest face one final time so the result reflects the
+    // current polytope rather than any index left over from the loop.
+    min_face = pp_find_min_face(&polytope);
+    PPPolytopeFace *min_face_ptr = &polytope.faces[min_face];
 
     *intersection = min_face_ptr->d + 0.001f;
 
@@ -2967,7 +2985,12 @@ bool pp_epa(PPSimplex *simplex,
     pp_vec3_scale(&polytope.points[f->c].a, barycentric.z, &p2);
     pp_vec3_add(&p0, &p1, contact);
     pp_vec3_add(contact, &p2, contact);
-    pp_vec3_neg(&min_face_ptr->n, n);
+
+    // The closest-face normal points away from the origin in Minkowski (A-B)
+    // space; that is exactly the contact normal the solver expects -- pointing
+    // from obj1 (lhs) toward obj2 (rhs). (Negating it here pushed overlapping
+    // bodies *together*, which made box stacks gain energy and explode.)
+    pp_vec3_assign(n, &min_face_ptr->n);
 
     return true;
 }
