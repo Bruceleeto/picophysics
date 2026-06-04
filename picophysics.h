@@ -1030,21 +1030,30 @@ bool pp_sphere_intersect(
         return false;
     }
 
-    // Calculate the two points of intersection
+    // Calculate the two points of intersection. oc points from the ray origin
+    // to the sphere centre, so b = oc·d is positive when the sphere is ahead of
+    // the origin and the roots are t = b ± sqrt(disc). (Using -b here would only
+    // ever return hits for spheres *behind* the ray.)
     float sqrtDiscriminant = sqrtf(discriminant);
-    float t1 = -b - sqrtDiscriminant;
-    float t2 = -b + sqrtDiscriminant;
+    float t1 = b - sqrtDiscriminant;
+    float t2 = b + sqrtDiscriminant;
 
     // Check if the points of intersection are in front of the ray origin
     if (t1 > 0 && (t2 <= 0 || t1 < t2)) {
         PPVec3 add;
         pp_vec3_scale(d, t1, &add);
         pp_vec3_add(o, &add, out);
+        if (distance) {
+            *distance = t1;
+        }
         return true;
     } else if (t2 > 0) {
         PPVec3 add;
         pp_vec3_scale(d, t2, &add);
         pp_vec3_add(o, &add, out);
+        if (distance) {
+            *distance = t2;
+        }
         return true;
     }
 
@@ -1811,8 +1820,11 @@ void pp_physics_clear()
     tri_count = 0;
     object_count = 0;
     dead_object_count = 0;
+    constraint_count = 0;
+    dead_constraint_count = 0;
     memset(tris, 0, sizeof(tris));
     memset(objects, 0, sizeof(objects));
+    memset(constraints, 0, sizeof(constraints));
 }
 
 size_t pp_physics_triangle_count()
