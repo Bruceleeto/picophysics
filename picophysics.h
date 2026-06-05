@@ -2203,15 +2203,20 @@ static void pp_solve_velocities(const PPCollision *manifold, float t)
     pp_vec3_scale(&impulse, rhs->inv_mass, &i_tmp);
     pp_vec3_add(&rhs->vel, &i_tmp, &rhs->vel);
 
-    // Calculate and add angular impulse to the left
+    // Calculate and apply the angular impulse to the left. The sign must match
+    // the linear impulse above: the impulse on lhs is -P (it subtracts P/m from
+    // the linear velocity), so the angular change is -I^-1 (r_a x P). Using +
+    // here made the normal impulse inconsistent with both the linear term and
+    // the friction block below, injecting energy on any off-centre (lever-arm)
+    // contact -- e.g. an offset sphere shape would spin up and fly off.
     pp_vec3_cross(&lhs_pcp, &impulse, &ang_imp);
     pp_mat3_mult(&lhs->inv_inertia, &ang_imp, &ang_imp);
-    pp_vec3_add(&lhs->a_vel, &ang_imp, &lhs->a_vel);
+    pp_vec3_sub(&lhs->a_vel, &ang_imp, &lhs->a_vel);
 
-    // Same with the right
+    // Same with the right (impulse on rhs is +P).
     pp_vec3_cross(&rhs_pcp, &impulse, &ang_imp);
     pp_mat3_mult(&rhs->inv_inertia, &ang_imp, &ang_imp);
-    pp_vec3_sub(&rhs->a_vel, &ang_imp, &rhs->a_vel);
+    pp_vec3_add(&rhs->a_vel, &ang_imp, &rhs->a_vel);
 
     // Friction!!!
     float f = manifold->obj1_friction * manifold->obj2_friction;
