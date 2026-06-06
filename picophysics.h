@@ -27,13 +27,13 @@
  * Shape primitives:
  *
  * - Spheres (fully dynamic and responsive)
- * - Boxes (only collides with spheres currently)
+ * - Boxes (fully dynamic; box/box and box/triangle use SAT with a multi-point
+ *   contact manifold, so boxes rest and stack stably)
  * - Triangles (static environment, not a body shape)
  *
  * Bodies can also be joined together through constraints. Currently only fixed distance constraints are supported.
  *
- * Currently Spheres are the only fully dynamic and responsive object. Ray-casting
- * the world is also supported.
+ * Ray-casting the world is also supported.
  *
  * There is only one global "world", all things are created with in it, and you can empty
  * it with pp_physics_clear(). You also don't need to initialise the world, just start creating
@@ -2765,8 +2765,7 @@ static bool pp_sat_box_box(const PPVec3 *posA, const PPQuaternion *rotA, const P
     const float sa[4] = { 1.0f, 1.0f, -1.0f, -1.0f };
     const float sb[4] = { 1.0f, -1.0f, -1.0f, 1.0f };
     for (int v = 0; v < 4; ++v) {
-        PPVec3 p = incCenter;
-        PVec3 add;
+        PPVec3 p = incCenter, add;
         pp_vec3_scale(&incAxes[ia_i], sa[v] * hia, &add);
         pp_vec3_add(&p, &add, &p);
 
@@ -2805,6 +2804,136 @@ static bool pp_sat_box_box(const PPVec3 *posA, const PPQuaternion *rotA, const P
     return true;
 }
 
+/* One-sided box vs triangle, matching the sphere/triangle convention: the
+ * triangle is a one-sided face and the box is only resolved when its centre is
+ * on the front (+normal) side. The box's incident face (the one most directly
+ * facing the triangle) is clipped against the triangle's three edge planes, and
+ * each surviving corner becomes a contact. Penetrating corners are real
+ * contacts; corners still in front become *speculative* contacts when the box
+ * is closing fast enough to cross this step, which stops fast boxes tunnelling.
+ *
+ * The contact normal points from the box into the triangle (-tri->n); the solver
+ * then pushes the box out along +tri->n. out->depths[] are SIGNED: positive =
+ * penetration, negative = remaining gap (the caller forms dist / separation). */
+static int pp_sat_box_triangle(const PPVec3 *box_pos, const PPQuaternion *box_rot,
+                               const PPVec3 *box_he, const PPTriangle *tri,
+                               const PPVec3 *box_vel, float t, PPBoxContact *out)
+{
+    const PPVec3 *n = &tri->n;
+
+    PPVec3 ub[3];
+    pp_box_world_axes(box_rot, ub);
+
+    /* One-sided: the box centre must be in front of the triangle plane. This
+     * both implements the one-sided behaviour (a box approaching from behind is
+     * ignored, like a sphere) and guarantees the incident face faces the
+     * triangle. */
+    float sd = pp_dot_rel(box_pos, &tri->v[0], n);
+    if (sd <= 0.0f) {
+        out->count = 0;
+        return 0;
+    }
+
+    /* Incident face: box face whose outward normal is most opposed to n. */
+    int inc = 0;
+    float best = -1.0f;
+    for (int k = 0; k < 3; ++k) {
+        float a = fabsf(pp_vec3_dot(&ub[k], n));
+        if (a > best) { best = a; inc = k; }
+    }
+    PPVec3 incN = ub[inc];
+    if (pp_vec3_dot(&incN, n) > 0.0f) {
+        pp_vec3_neg(&incN, &incN); /* point toward the triangle (-n side) */
+    }
+
+    PPVec3 faceCenter;
+    {
+        PPVec3 off; pp_vec3_scale(&incN, box_he->xyz[inc], &off);
+        pp_vec3_add(box_pos, &off, &faceCenter);
+    }
+    int ia = (inc + 1) % 3, ib = (inc + 2) % 3;
+    float hia = box_he->xyz[ia], hib = box_he->xyz[ib];
+
+    /* Four incident-face corners. */
+    PPVec3 bufA[PP_MAX_BOX_CONTACTS * 2], bufB[PP_MAX_BOX_CONTACTS * 2];
+    const float sa[4] = { 1.0f, 1.0f, -1.0f, -1.0f };
+    const float sb[4] = { 1.0f, -1.0f, -1.0f, 1.0f };
+    for (int v = 0; v < 4; ++v) {
+        PPVec3 p = faceCenter, add;
+        pp_vec3_scale(&ub[ia], sa[v] * hia, &add); pp_vec3_add(&p, &add, &p);
+        pp_vec3_scale(&ub[ib], sb[v] * hib, &add); pp_vec3_add(&p, &add, &p);
+        bufA[v] = p;
+    }
+
+    /* Clip against the triangle's three edge half-spaces (each plane is
+     * perpendicular to the triangle, through an edge, normal pointing outward).
+     * A corner outside any edge is removed, so a box face that does not overlap
+     * the triangle laterally yields no contacts. */
+    const PPVec3 *V[3] = { &tri->v[0], &tri->v[1], &tri->v[2] };
+    PPVec3 *src = bufA, *dst = bufB;
+    int cnt = 4;
+    for (int e = 0; e < 3; ++e) {
+        const PPVec3 *a = V[e];
+        const PPVec3 *b = V[(e + 1) % 3];
+        const PPVec3 *opp = V[(e + 2) % 3];
+        PPVec3 edge; pp_vec3_sub(b, a, &edge);
+        PPVec3 m; pp_vec3_cross(&edge, n, &m);
+        PPVec3 to_opp; pp_vec3_sub(opp, a, &to_opp);
+        if (pp_vec3_dot(&m, &to_opp) > 0.0f) {
+            pp_vec3_neg(&m, &m); /* orient outward (away from the interior) */
+        }
+        cnt = pp_clip_halfspace(src, cnt, dst, a, &m, 0.0f);
+        PPVec3 *tmp = src; src = dst; dst = tmp;
+        if (cnt == 0) break;
+    }
+
+    pp_vec3_neg(n, &out->normal); /* box -> triangle */
+    out->count = 0;
+    if (cnt == 0) {
+        return 0;
+    }
+
+    /* Approach speed: velocity component heading into the front face. */
+    float approach = -pp_vec3_dot(box_vel, n);
+
+    /* Penetrating corners form the real, multi-point manifold (needed for a
+     * stable resting box). While the box is still entirely in front, emit a
+     * SINGLE speculative contact placed at the box centre projected onto the
+     * triangle plane. Two reasons: braking N speculative contacts independently
+     * over-applies the impulse and launches the box; and on a multi-triangle
+     * floor a box straddling an edge would otherwise get one speculative contact
+     * per triangle at conflicting offset positions. The projected centre is the
+     * same point for every coplanar triangle, so they reinforce instead of
+     * fighting, and it carries ~no lever arm so the brake adds no spin. */
+    int gap_n = 0;
+    float min_gap = FLT_MAX;
+
+    for (int i = 0; i < cnt; ++i) {
+        float front = pp_dot_rel(&src[i], &tri->v[0], n); /* >0 in front, <0 behind */
+        if (front <= 0.0f) {
+            /* Penetrating: real contact, depth = how far behind the plane. */
+            if (out->count < PP_MAX_BOX_CONTACTS) {
+                out->points[out->count] = src[i];
+                out->depths[out->count] = -front;
+                out->count++;
+            }
+        } else {
+            gap_n++;
+            if (front < min_gap) min_gap = front;
+        }
+    }
+
+    if (out->count == 0 && gap_n > 0 && approach > 0.0f && min_gap <= approach * t) {
+        PPVec3 off, cp;
+        pp_vec3_scale(n, sd, &off);
+        pp_vec3_sub(box_pos, &off, &cp); /* box centre projected onto the plane */
+        out->points[0] = cp;
+        out->depths[0] = -min_gap; /* negative -> gap -> caller forms separation */
+        out->count = 1;
+    }
+    return out->count;
+}
+
 void pp_physics_step(float t, int vel_iterations, int pos_iterations)
 {
     int manifold_count = 0;
@@ -2819,26 +2948,42 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
 
         const struct _PPCollisionMapEntry *cb = NULL;
 
-        // Sphere/triangle collisions: iterate shapes of this body
+        // Shape/triangle collisions: iterate shapes of this body. Spheres and
+        // boxes both collide with the static triangle soup.
         for (int si = 0; si < lhs_body->shape_count; ++si) {
             const PPShape *lhs_shape = &lhs_body->shapes[si];
-            if (lhs_shape->type != PP_OBJECT_TYPE_SPHERE) continue;
+            if (lhs_shape->type != PP_OBJECT_TYPE_SPHERE &&
+                lhs_shape->type != PP_OBJECT_TYPE_BOX) {
+                continue;
+            }
 
             PPVec3 shape_pos;
             pp_shape_world_pos(lhs_body, lhs_shape, &shape_pos);
 
-            float radius = lhs_shape->sphere.radius;
+            float radius = (lhs_shape->type == PP_OBJECT_TYPE_SPHERE)
+                               ? lhs_shape->sphere.radius
+                               : lhs_shape->box.bounding_radius;
             float pos_x = shape_pos.x;
             float pos_y = shape_pos.y;
             float pos_z = shape_pos.z;
 
-            // Expand the broadphase by the distance the sphere may travel this
+            // Expand the broadphase by the distance the shape may travel this
             // step. A fast mover that the static radius check would cull is
             // still considered, so it can be caught speculatively before it
             // tunnels through a triangle.
             float speed = pp_vec3_length(&lhs_body->vel);
             float reach = radius + speed * t;
             float reach_sq = reach * reach;
+
+            // Box/triangle contacts are deduplicated across triangles for this
+            // shape: a box spanning a shared edge of two coplanar triangles
+            // would otherwise get the same corner contact from both, and those
+            // doubled contacts make the solver converge to a wrong, energy-
+            // injecting state. Track emitted (point,normal) pairs and skip
+            // near-coincident repeats.
+            PPVec3 emitted_pt[32];
+            PPVec3 emitted_n[32];
+            int emitted_count = 0;
 
             int last_kind = -1;
             for (int j = 0; j < tri_count; ++j) {
@@ -2862,49 +3007,111 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                     continue;
                 }
 
-                PPVec3 p, d;
-                pp_vec3_scale(&tri->n, -1.0f, &d);
-                float dist; // perpendicular distance from sphere centre to plane
-                if (pp_tri_intersect(tri, &shape_pos, &d, &p, &dist)) {
-                    float separation = dist - radius;
+                if (lhs_shape->type == PP_OBJECT_TYPE_SPHERE) {
+                    PPVec3 p, d;
+                    pp_vec3_scale(&tri->n, -1.0f, &d);
+                    float dist; // perpendicular distance from sphere centre to plane
+                    if (pp_tri_intersect(tri, &shape_pos, &d, &p, &dist)) {
+                        float separation = dist - lhs_shape->sphere.radius;
 
-                    // Decide whether to register a contact this step. Either the
-                    // sphere is already touching/penetrating, or it has a gap but
-                    // is approaching fast enough to close it within this step --
-                    // a speculative contact, which is what stops fast spheres
-                    // tunnelling straight through the triangle.
-                    bool contact = false;
-                    if (separation <= 0.0f) {
-                        contact = true;
-                    } else {
-                        // Approach speed is the velocity component heading into
-                        // the front face of the triangle.
-                        float approach = -pp_vec3_dot(&lhs_body->vel, &tri->n);
-                        if (approach > 0.0f && separation <= approach * t) {
+                        // Either the sphere is already touching/penetrating, or it
+                        // has a gap but is approaching fast enough to close it this
+                        // step -- a speculative contact that stops fast spheres
+                        // tunnelling through the triangle.
+                        bool contact = false;
+                        if (separation <= 0.0f) {
                             contact = true;
+                        } else {
+                            float approach = -pp_vec3_dot(&lhs_body->vel, &tri->n);
+                            if (approach > 0.0f && separation <= approach * t) {
+                                contact = true;
+                            }
+                        }
+
+                        if (contact) {
+                            PPCollision c;
+                            pp_fill_collision_info_sphere_triangle(lhs_body, lhs_shape,
+                                                                   tri, &p,
+                                                                   lhs_shape->sphere.radius - dist,
+                                                                   &c);
+
+                            bool respond = true;
+                            if (cb) {
+                                respond = cb->collision_callback(lhs_body, tri,
+                                                                 lhs_shape->kind, tri->kind,
+                                                                 &c, cb->user_data);
+                            }
+
+                            if (respond) {
+                                manifolds[manifold_count++] = c;
+                            }
                         }
                     }
+                } else {
+                    // Box vs triangle via SAT, one-sided, with a clipped
+                    // multi-point manifold and speculative contacts.
+                    PPBoxContact bc;
+                    int nc = pp_sat_box_triangle(&shape_pos, &lhs_body->rot,
+                                                 &lhs_shape->box.half_extents, tri,
+                                                 &lhs_body->vel, t, &bc);
+                    if (nc > 0) {
+                        int deepest = 0;
+                        for (int k = 1; k < nc; ++k) {
+                            if (bc.depths[k] > bc.depths[deepest]) deepest = k;
+                        }
 
-                    if (contact) {
-                        PPCollision c;
-                        pp_fill_collision_info_sphere_triangle(lhs_body, lhs_shape,
-                                                               tri,
-                                                               &p,
-                                                               radius - dist,
-                                                               &c);
+                        PPCollision rep;
+                        rep.n = bc.normal;
+                        rep.p = bc.points[deepest];
+                        rep.dist = bc.depths[deepest];
+                        rep.separation = -bc.depths[deepest];
+                        rep.obj1 = lhs_body;
+                        rep.obj2 = &trimesh_body;
+                        rep.obj1_bounce = lhs_body->bounce;
+                        rep.obj2_bounce = tri->bounce;
+                        rep.obj1_friction = lhs_body->friction;
+                        rep.obj2_friction = tri->friction;
+                        rep.type1 = PP_OBJECT_TYPE_BOX;
+                        rep.type2 = PP_OBJECT_TYPE_TRIANGLE;
+                        rep.kind1 = lhs_shape->kind;
+                        rep.kind2 = tri->kind;
 
                         bool respond = true;
                         if (cb) {
-                            respond = cb->collision_callback(lhs_body,
-                                                             tri,
-                                                             lhs_shape->kind,
-                                                             tri->kind,
-                                                             &c,
-                                                             cb->user_data);
+                            respond = cb->collision_callback(lhs_body, tri,
+                                                             lhs_shape->kind, tri->kind,
+                                                             &rep, cb->user_data);
                         }
 
                         if (respond) {
-                            manifolds[manifold_count++] = c;
+                            for (int k = 0; k < nc &&
+                                            manifold_count < PICOPHYSICS_MAX_MANIFOLDS; ++k) {
+                                // Skip a contact coincident with one already
+                                // emitted for this shape with the same normal.
+                                bool dup = false;
+                                for (int e = 0; e < emitted_count; ++e) {
+                                    PPVec3 diff;
+                                    pp_vec3_sub(&bc.points[k], &emitted_pt[e], &diff);
+                                    if (pp_vec3_length_sq(&diff) < 1e-6f &&
+                                        pp_vec3_dot(&bc.normal, &emitted_n[e]) > 0.999f) {
+                                        dup = true;
+                                        break;
+                                    }
+                                }
+                                if (dup) continue;
+
+                                if (emitted_count < 32) {
+                                    emitted_pt[emitted_count] = bc.points[k];
+                                    emitted_n[emitted_count] = bc.normal;
+                                    emitted_count++;
+                                }
+
+                                PPCollision c = rep;
+                                c.p = bc.points[k];
+                                c.dist = bc.depths[k];
+                                c.separation = -bc.depths[k];
+                                manifolds[manifold_count++] = c;
+                            }
                         }
                     }
                 }
