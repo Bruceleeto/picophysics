@@ -174,6 +174,7 @@ typedef enum _PPObjectType {
     PP_OBJECT_TYPE_SPHERE,
     PP_OBJECT_TYPE_BOX,
     PP_OBJECT_TYPE_TRIANGLE,
+    PP_OBJECT_TYPE_CAPSULE,
 } PPObjectType;
 
 #ifndef PP_MAX_SHAPES_PER_BODY
@@ -188,6 +189,9 @@ typedef struct _PPShape {
     union {
         struct { float radius; } sphere;
         struct { PPVec3 whd; PPVec3 half_extents; float bounding_radius; } box;
+        /* A sphere of `radius` swept along the body's local Y axis, from
+         * -half_height to +half_height about the shape's offset. */
+        struct { float radius; float half_height; } capsule;
     };
 } PPShape;
 
@@ -241,6 +245,9 @@ typedef struct _PPCollision
 
     PPVec3 r1, r2;                   /* contact point relative to each body, at step start */
     float mass_n, mass_t1, mass_t2;  /* effective masses along n, t1, t2 */
+    float roll_radius;               /* set by capsule contacts: the radius it rolls on */
+    float roll_limit;                /* rolling resistance torque per unit normal impulse */
+    PPVec3 jroll;                    /* rolling resistance applied this substep */
 
     /* Restitution target, captured once per step from the approach velocity
      * before any solving. It cannot be re-derived later: once the contact has
@@ -293,6 +300,7 @@ typedef struct _PPBody
 
     float bounce;
     float friction;
+    float rolling_resistance;
     float damping;
     float a_damping;
 
@@ -330,6 +338,15 @@ typedef struct _PPBody
      * substeps without re-running collision detection. */
     PPVec3 solve_dpos;
     PPVec3 solve_dtheta;
+
+    /* Sleeping. A body that has been still for long enough, along with
+     * everything it is touching, stops being simulated until something
+     * disturbs it. sleep_group ties together the bodies that went to sleep as
+     * one resting pile, so that waking any of them wakes them all. */
+    bool is_asleep;
+    bool never_sleeps;
+    float sleep_time;
+    uint32_t sleep_group;
 
 } PPBody;
 
@@ -447,6 +464,16 @@ PPBody *pp_physics_create_sphere(float radius, const PPVec3 *pos, float mass, Bo
 
 PPBody *pp_physics_create_box(
     float width, float height, float depth, const PPVec3 *pos, float mass, BodyKind kind);
+
+/* A capsule: a cylinder with rounded ends, standing along the body's local Y
+ * axis. `height` is the overall height, caps included, so a 1.8 tall character
+ * of radius 0.4 is (0.4, 1.8); anything not taller than 2 * radius is a sphere.
+ * The rounded bottom rides over the seams and small steps that catch a box,
+ * which makes it the usual shape for a character (lock pitch and roll with
+ * pp_body_lock_axis() to keep it upright). */
+PPBody *pp_physics_create_capsule(float radius, float height, const PPVec3 *pos, float mass, BodyKind kind);
+PPShape *pp_body_add_capsule(PPBody *body, float radius, float height, float mass, BodyKind kind, float offset_x, float offset_y, float offset_z);
+
 PPBody *pp_physics_create_body(const PPVec3 *pos);
 PPShape *pp_body_add_box(PPBody *body, float w, float h, float d, float mass, BodyKind kind, float offset_x, float offset_y, float offset_z);
 PPShape *pp_body_add_sphere(PPBody *body, float radius, float mass, BodyKind kind, float offset_x, float offset_y, float offset_z);
@@ -457,6 +484,24 @@ size_t pp_body_get_constraint_count(PPBody *body);
 PPConstraint* pp_physics_create_fixed_distance_constraint(PPBody* body1, PPBody* body2, float distance);
 
 void pp_physics_destroy_body(PPBody *b);
+
+/* Sleeping: bodies that come to rest stop costing anything until disturbed.
+ * On by default. Every pp_body_* call that changes a body's motion, position
+ * or shape wakes it; if you write to a PPBody's fields directly, call
+ * pp_body_wake() yourself. Adding or removing static triangles under sleeping
+ * bodies does not wake them -- call pp_physics_wake_all(). */
+void pp_physics_set_sleeping_enabled(bool enabled);
+bool pp_physics_get_sleeping_enabled();
+/* A body sleeps after moving slower than `linear` (units/s) and turning slower
+ * than `angular` (rad/s) for `seconds`. Defaults: 0.05, 0.05, 0.5. */
+void pp_physics_set_sleep_thresholds(float linear, float angular, float seconds);
+void pp_physics_wake_all();
+void pp_body_wake(PPBody *b);
+bool pp_body_is_asleep(const PPBody *b);
+/* Exempt a body from sleeping (e.g. the player). Bodies resting on it can
+ * still sleep only if it could too, so use sparingly. */
+void pp_body_set_never_sleeps(PPBody *b, bool never);
+
 const PPBody *pp_physics_body_at(size_t i);
 size_t pp_physics_body_count();
 size_t pp_physics_body_total_count();
@@ -482,12 +527,28 @@ void *pp_body_get_user_data(const PPBody *s);
 void pp_body_set_kind(PPBody *b, BodyKind kind);
 BodyKind pp_body_get_kind(const PPBody *b);
 bool pp_body_set_friction(PPBody *s, float f);
+/* How quickly a rolling sphere comes to rest: 0 rolls forever, the default
+ * 0.05 stops a ball over a few tens of metres on the flat. Only affects sphere
+ * shapes. */
+void pp_body_set_rolling_resistance(PPBody *s, float r);
 void pp_body_set_mass(PPBody* b, float mass);
 float pp_body_get_mass(const PPBody* b);
 void pp_body_get_velocity(const PPBody *s, PPVec3 *vel);
 void pp_body_get_velocity_at_position(const PPBody *b, const PPVec3 *p, PPVec3 *ret);
 void pp_body_set_angular_velocity(PPBody *s, float x, float y, float z);
 void pp_body_set_velocity(PPBody *s, float x, float y, float z);
+
+/* Kinematic bodies: a body with zero mass that is given a velocity (linear,
+ * angular or both) moves at exactly that velocity. Gravity, collisions and
+ * constraints never alter it, but it pushes dynamic bodies out of its way and
+ * carries along whatever rests on it -- a lift, a sliding door, a moving
+ * platform. It keeps moving until you set its velocity back to zero.
+ *
+ * pp_body_move_kinematic() is for animation-driven movers: it sets the
+ * velocity that takes the body to `target` over the next step of length `dt`,
+ * so riders feel the motion instead of being teleported through. Call it
+ * every frame before pp_physics_step(). */
+void pp_body_move_kinematic(PPBody *s, const PPVec3 *target, float dt);
 void pp_body_set_angular_acceleration(PPBody *s, float x, float y, float z);
 void pp_body_set_acceleration(PPBody *s, float x, float y, float z);
 void pp_body_look_at(PPBody *s, float x, float y, float z);
@@ -598,6 +659,16 @@ static int collision_map_count = 0;
 
 static PPVec3 gravity = {.xyz = {0.0f, 0.0f, 0.0f}};
 static float gravity_magnitude = 0.0f;
+
+/* Contacts are generated for shapes within this distance of touching, so that
+ * a resting contact persists from step to step instead of flickering. */
+#define PP_CONTACT_MARGIN 0.02f
+
+static bool sleeping_enabled = true;
+static float sleep_linear_threshold = 0.05f;
+static float sleep_angular_threshold = 0.05f;
+static float sleep_delay = 0.5f;
+static uint32_t sleep_group_counter = 0;
 
 PPVec3 *pp_vec3_init(PPVec3 *v)
 {
@@ -959,6 +1030,60 @@ bool pp_sphere_intersect(
     const PPVec3 *sphere_pos, float radius, const PPVec3 *o, const PPVec3 *d, PPVec3 *out, float *distance);
 bool pp_tri_intersect(
     const PPTriangle *tri, const PPVec3 *o, const PPVec3 *d, PPVec3 *out, float *distance);
+bool pp_capsule_intersect(const PPVec3 *a, const PPVec3 *b, float radius,
+                          const PPVec3 *o, const PPVec3 *d, PPVec3 *out, float *distance);
+
+/* Ray against a capsule with end points a and b. `d` must be unit length. */
+bool pp_capsule_intersect(const PPVec3 *a, const PPVec3 *b, float radius,
+                          const PPVec3 *o, const PPVec3 *d, PPVec3 *out, float *distance)
+{
+    float best = FLT_MAX;
+    PPVec3 best_hit = {.xyz = {0.0f, 0.0f, 0.0f}};
+
+    // The two caps.
+    const PPVec3 *ends[2] = {a, b};
+    for (int i = 0; i < 2; ++i) {
+        PPVec3 hit;
+        float t;
+        if (pp_sphere_intersect(ends[i], radius, o, d, &hit, &t) && t < best) {
+            best = t;
+            best_hit = hit;
+        }
+    }
+
+    // The side: an infinite cylinder, accepted only between the two ends.
+    PPVec3 u, m;
+    pp_vec3_sub(b, a, &u);
+    float len = pp_vec3_length(&u);
+    if (len > 1e-6f) {
+        pp_vec3_scale(&u, 1.0f / len, &u);
+        pp_vec3_sub(o, a, &m);
+
+        float mu = pp_vec3_dot(&m, &u);
+        float du = pp_vec3_dot(d, &u);
+        PPVec3 mp = {.xyz = {m.x - u.x * mu, m.y - u.y * mu, m.z - u.z * mu}};
+        PPVec3 dp = {.xyz = {d->x - u.x * du, d->y - u.y * du, d->z - u.z * du}};
+
+        float A = pp_vec3_dot(&dp, &dp);
+        float B = pp_vec3_dot(&mp, &dp);
+        float C = pp_vec3_dot(&mp, &mp) - radius * radius;
+        float disc = B * B - A * C;
+        if (A > 1e-8f && disc >= 0.0f) {
+            float t = (-B - sqrtf(disc)) / A;
+            float along = mu + du * t;
+            if (t > 0.0f && t < best && along >= 0.0f && along <= len) {
+                best = t;
+                pp_vec3_scale(d, t, &best_hit);
+                pp_vec3_add(o, &best_hit, &best_hit);
+            }
+        }
+    }
+
+    if (distance) *distance = best;
+    if (best == FLT_MAX) return false;
+    if (out) *out = best_hit;
+    return true;
+}
 
 bool pp_contains_kind(BodyKind *kinds, BodyKind kind)
 {
@@ -1041,6 +1166,12 @@ bool pp_physics_ray_intersect(const PPVec3 *origin,
                 did_hit = pp_sphere_intersect(&shape_world_pos, shape->sphere.radius, origin, direction, &hit, &dist);
             } else if (shape->type == PP_OBJECT_TYPE_BOX) {
                 did_hit = pp_box_intersect(&shape_world_pos, &body->rot, &shape->box.whd, origin, direction, &hit, &dist);
+            } else if (shape->type == PP_OBJECT_TYPE_CAPSULE) {
+                PPVec3 up = {.xyz = {0.0f, shape->capsule.half_height, 0.0f}}, axis, a, b;
+                pp_quat_transform(&body->rot, &up, &axis);
+                pp_vec3_sub(&shape_world_pos, &axis, &a);
+                pp_vec3_add(&shape_world_pos, &axis, &b);
+                did_hit = pp_capsule_intersect(&a, &b, shape->capsule.radius, origin, direction, &hit, &dist);
             }
 
             if (did_hit && dist < closest_dist) {
@@ -1247,25 +1378,30 @@ BodyKind pp_body_get_kind(const PPBody *b)
 
 void pp_body_set_angular_velocity(PPBody *s, float x, float y, float z)
 {
+    pp_body_wake(s);
     pp_vec3_set(&s->a_vel, x, y, z);
 }
 
 void pp_body_set_velocity(PPBody *s, float x, float y, float z)
 {
+    pp_body_wake(s);
     pp_vec3_set(&s->vel, x, y, z);
 }
 
 void pp_body_set_angular_acceleration(PPBody *s, float x, float y, float z)
 {
+    pp_body_wake(s);
     pp_vec3_set(&s->a_acc, x, y, z);
 }
 
 void pp_body_set_acceleration(PPBody *s, float x, float y, float z)
 {
+    pp_body_wake(s);
     pp_vec3_set(&s->acc, x, y, z);
 }
 
 void pp_body_set_gravity_multiplier(PPBody *b, float multiplier) {
+    pp_body_wake(b);
     b->gravity_multiplier = multiplier;
 }
 
@@ -1291,10 +1427,82 @@ void pp_body_set_damping(PPBody *s, float d)
     s->damping = d;
 }
 
+void pp_body_set_rolling_resistance(PPBody *s, float r)
+{
+    s->rolling_resistance = (r < 0.0f) ? 0.0f : r;
+}
+
+void pp_body_move_kinematic(PPBody *s, const PPVec3 *target, float dt)
+{
+    if (dt <= 0.0f) return;
+
+    pp_body_set_velocity(s,
+                         (target->x - s->pos.x) / dt,
+                         (target->y - s->pos.y) / dt,
+                         (target->z - s->pos.z) / dt);
+}
+
+void pp_body_wake(PPBody *b)
+{
+    if (!b) return;
+
+    b->sleep_time = 0.0f;
+    if (!b->is_asleep) return;
+
+    // Everything that fell asleep as part of the same resting pile wakes
+    // together: they were leaning on each other.
+    uint32_t group = b->sleep_group;
+    for (int i = 0; i < object_count; ++i) {
+        PPBody *o = &objects[i];
+        if (o->is_alive && o->is_asleep && o->sleep_group == group) {
+            o->is_asleep = false;
+            o->sleep_time = 0.0f;
+        }
+    }
+}
+
+bool pp_body_is_asleep(const PPBody *b)
+{
+    return b->is_asleep;
+}
+
+void pp_body_set_never_sleeps(PPBody *b, bool never)
+{
+    b->never_sleeps = never;
+    if (never) pp_body_wake(b);
+}
+
+void pp_physics_wake_all()
+{
+    for (int i = 0; i < object_count; ++i) {
+        objects[i].is_asleep = false;
+        objects[i].sleep_time = 0.0f;
+    }
+}
+
+void pp_physics_set_sleeping_enabled(bool enabled)
+{
+    sleeping_enabled = enabled;
+    if (!enabled) pp_physics_wake_all();
+}
+
+bool pp_physics_get_sleeping_enabled()
+{
+    return sleeping_enabled;
+}
+
+void pp_physics_set_sleep_thresholds(float linear, float angular, float seconds)
+{
+    sleep_linear_threshold = linear;
+    sleep_angular_threshold = angular;
+    sleep_delay = seconds;
+}
+
 static void pp_body_recompute_mass_inertia(PPBody *body);
 static inline void pp_body_world_com(const PPBody *body, PPVec3 *out);
 
 void pp_body_set_mass(PPBody* b, float mass) {
+    pp_body_wake(b);
     // Scale all shape masses proportionally
     if (b->mass > 0.0f && b->shape_count > 0) {
         float ratio = mass / b->mass;
@@ -1364,6 +1572,8 @@ float pp_body_get_radius(PPBody *s)
             r = shape->sphere.radius + offset_len;
         } else if (shape->type == PP_OBJECT_TYPE_BOX) {
             r = shape->box.bounding_radius + offset_len;
+        } else if (shape->type == PP_OBJECT_TYPE_CAPSULE) {
+            r = shape->capsule.radius + shape->capsule.half_height + offset_len;
         }
         if (r > max_r) max_r = r;
     }
@@ -1390,6 +1600,7 @@ void pp_quat_from_axis_angle(PPQuaternion *q, const PPVec3 *axis, float angle)
 
 void pp_body_look_at(PPBody *s, float x, float y, float z)
 {
+    pp_body_wake(s);
     PPVec3 t, f, c;
     pp_vec3_set(&t, x, y, z);
     pp_body_get_forward(s, &f);
@@ -1481,6 +1692,7 @@ static void pp_body_init(PPBody *body, const PPVec3 *pos, float mass, BodyKind k
     body->mass = mass;
     body->inv_mass = (mass == 0.0f) ? 0.0f : 1.0f / mass;
     body->friction = 0.75f;
+    body->rolling_resistance = 0.05f;
     body->damping = 0.01f;
     body->a_damping = 0.02f;
     body->vel_limit = 0.0f;
@@ -1578,6 +1790,20 @@ static void pp_body_recompute_mass_inertia(PPBody *body)
             Ixx = oot * m * (h2 + d2);
             Iyy = oot * m * (w2 + d2);
             Izz = oot * m * (w2 + h2);
+        } else if (s->type == PP_OBJECT_TYPE_CAPSULE) {
+            // A cylinder plus the two halves of a sphere, sharing the mass in
+            // proportion to their volumes.
+            float r = s->capsule.radius;
+            float h = 2.0f * s->capsule.half_height;
+            float r2 = r * r;
+            float v_cyl = h;                   // common factor pi * r^2 dropped
+            float v_sph = (4.0f / 3.0f) * r;
+            float m_cyl = m * v_cyl / (v_cyl + v_sph);
+            float m_sph = m - m_cyl;
+
+            Iyy = 0.5f * m_cyl * r2 + 0.4f * m_sph * r2;
+            Ixx = Izz = m_cyl * (h * h / 12.0f + r2 / 4.0f) +
+                        m_sph * (0.4f * r2 + h * h / 4.0f + 0.375f * h * r);
         }
 
         // Parallel axis theorem: I_total += I_local + m * (d·d * I3 - outer(d,d))
@@ -1610,6 +1836,7 @@ static void pp_body_recompute_mass_inertia(PPBody *body)
 
 PPShape *pp_body_add_sphere(PPBody *body, float radius, float mass, BodyKind kind, float offset_x, float offset_y, float offset_z)
 {
+    pp_body_wake(body);
     assert(body->shape_count < PP_MAX_SHAPES_PER_BODY);
     PPShape *s = &body->shapes[body->shape_count++];
     memset(s, 0, sizeof(PPShape));
@@ -1630,6 +1857,7 @@ PPShape *pp_body_add_sphere(PPBody *body, float radius, float mass, BodyKind kin
 
 PPShape *pp_body_add_box(PPBody *body, float w, float h, float d, float mass, BodyKind kind, float offset_x, float offset_y, float offset_z)
 {
+    pp_body_wake(body);
     assert(body->shape_count < PP_MAX_SHAPES_PER_BODY);
     PPShape *s = &body->shapes[body->shape_count++];
     memset(s, 0, sizeof(PPShape));
@@ -1661,6 +1889,7 @@ void *pp_body_get_user_data(const PPBody *s)
 
 void pp_body_lock_axis(PPBody *s, PPAxisLock lock)
 {
+    pp_body_wake(s);
     s->lock = lock;
 }
 
@@ -1671,11 +1900,13 @@ void pp_body_get_position(PPBody *s, PPVec3 *pos)
 
 void pp_body_set_position(PPBody *s, float x, float y, float z)
 {
+    pp_body_wake(s);
     pp_vec3_set(&s->pos, x, y, z);
 }
 
 void pp_body_set_rotation(PPBody *s, float x, float y, float z, float w)
 {
+    pp_body_wake(s);
     pp_quat_set(&s->rot, x, y, z, w);
 }
 
@@ -1719,6 +1950,7 @@ bool pp_body_set_bounce(PPBody *s, float b)
 
 void pp_body_add_force(PPBody *s, float x, float y, float z)
 {
+    pp_body_wake(s);
     if(!s) {
         return;
     }
@@ -1740,6 +1972,7 @@ void pp_body_add_force(PPBody *s, float x, float y, float z)
 
 void pp_body_add_angular_force(PPBody *s, float tx, float ty, float tz)
 {
+    pp_body_wake(s);
     PPVec3 torque;
     pp_vec3_set(&torque, tx, ty, tz);
 
@@ -1950,6 +2183,38 @@ PPConstraint* pp_physics_create_fixed_distance_constraint(PPBody* body1, PPBody*
     return entry;
 }
 
+PPShape *pp_body_add_capsule(PPBody *body, float radius, float height, float mass, BodyKind kind, float offset_x, float offset_y, float offset_z)
+{
+    pp_body_wake(body);
+    assert(body->shape_count < PP_MAX_SHAPES_PER_BODY);
+    PPShape *s = &body->shapes[body->shape_count++];
+    memset(s, 0, sizeof(PPShape));
+    s->type = PP_OBJECT_TYPE_CAPSULE;
+    s->capsule.radius = radius;
+    s->capsule.half_height = fmaxf(0.0f, 0.5f * height - radius);
+    s->mass = mass;
+    s->kind = kind;
+    pp_vec3_set(&s->offset, offset_x, offset_y, offset_z);
+
+    if (body->shape_count == 1) {
+        body->kind = kind;
+    }
+
+    pp_body_recompute_mass_inertia(body);
+    return s;
+}
+
+PPBody *pp_physics_create_capsule(float radius, float height, const PPVec3 *pos, float mass, BodyKind kind)
+{
+    PPBody *body = pp_physics_create_body(pos);
+    if (!body) {
+        return NULL;
+    }
+
+    pp_body_add_capsule(body, radius, height, mass, kind, 0.0f, 0.0f, 0.0f);
+    return body;
+}
+
 PPBody *pp_physics_create_box(
     float width, float height, float depth, const PPVec3 *pos, float mass, BodyKind kind)
 {
@@ -2022,6 +2287,7 @@ void pp_physics_clear()
     constraint_count = 0;
     dead_constraint_count = 0;
     contact_cache_count = 0;
+    sleep_group_counter = 0;
     memset(tris, 0, sizeof(tris));
     memset(objects, 0, sizeof(objects));
     memset(constraints, 0, sizeof(constraints));
@@ -2074,6 +2340,20 @@ void pp_physics_destroy_body(PPBody *b)
         }
     }
 
+    // Whatever was asleep leaning on this body has lost its support.
+    pp_body_wake(b);
+    if (b->shape_count > 0) {
+        float r = pp_body_get_radius(b) + PP_CONTACT_MARGIN;
+        for (int i = 0; i < object_count; ++i) {
+            PPBody *o = &objects[i];
+            if (o == b || !o->is_alive || !o->is_asleep || o->shape_count == 0) continue;
+            float reach = r + pp_body_get_radius(o);
+            if (pp_vec3_dist_sq(&o->pos, &b->pos) <= reach * reach) {
+                pp_body_wake(o);
+            }
+        }
+    }
+
     b->is_alive = false;
     ++dead_object_count;
 }
@@ -2082,6 +2362,7 @@ void pp_physics_set_gravity(const PPVec3 *v)
 {
     pp_vec3_assign(&gravity, v);
     gravity_magnitude = pp_vec3_length(&gravity);
+    pp_physics_wake_all();
 }
 
 /* Called once per substep with the substep length `t`. `step_t` is the length
@@ -2096,7 +2377,7 @@ static void pp_integrate_forces(float t, float step_t, bool last)
     for (int i = 0; i < object_count; ++i) {
         PPBody *body = &objects[i];
 
-        if (!body->is_alive || body->inv_mass == 0.0f) {
+        if (!body->is_alive || body->inv_mass == 0.0f || body->is_asleep) {
             continue;
         }
 
@@ -2369,9 +2650,6 @@ static void pp_contact_rel_vel(const PPBody *lhs, const PPBody *rhs,
     pp_vec3_cross(&rhs->a_vel, rhs_pcp, &rhs_vel);
     pp_vec3_add(&rhs_vel, &rhs->vel, &rhs_vel);
 
-    if (lhs->inv_mass == 0.0f) pp_vec3_init(&lhs_vel);
-    if (rhs->inv_mass == 0.0f) pp_vec3_init(&rhs_vel);
-
     pp_vec3_sub(&rhs_vel, &lhs_vel, out);
 }
 
@@ -2424,6 +2702,8 @@ static void pp_prepare_contact(PPCollision *m, float t)
     m->impact = false;
     m->v_bias = 0.0f;
     m->mass_n = m->mass_t1 = m->mass_t2 = 0.0f;
+    m->roll_limit = 0.0f;
+    pp_vec3_init(&m->jroll);
 
     PPBody *lhs = m->obj1, *rhs = m->obj2;
     PPVec3 com1, com2;
@@ -2431,6 +2711,22 @@ static void pp_prepare_contact(PPCollision *m, float t)
     pp_body_world_com(rhs, &com2);
     pp_vec3_sub(&m->p, &com1, &m->r1);
     pp_vec3_sub(&m->p, &com2, &m->r2);
+
+    // Rolling resistance: a round shape resists turning with a torque of up to
+    // (coefficient * radius) per unit of normal load. The lever arm stands in
+    // for the radius, which is what it is for a lone sphere.
+    if (m->type1 == PP_OBJECT_TYPE_SPHERE) {
+        m->roll_limit = lhs->rolling_resistance * pp_vec3_length(&m->r1);
+    }
+    if (m->type2 == PP_OBJECT_TYPE_SPHERE) {
+        m->roll_limit = fmaxf(m->roll_limit, rhs->rolling_resistance * pp_vec3_length(&m->r2));
+    }
+    if (m->type1 == PP_OBJECT_TYPE_CAPSULE) {
+        m->roll_limit = fmaxf(m->roll_limit, lhs->rolling_resistance * m->roll_radius);
+    }
+    if (m->type2 == PP_OBJECT_TYPE_CAPSULE) {
+        m->roll_limit = fmaxf(m->roll_limit, rhs->rolling_resistance * m->roll_radius);
+    }
 
     if (!lhs->is_alive || !rhs->is_alive) return;
 
@@ -2503,6 +2799,10 @@ static void pp_warm_start_contact(PPCollision *m)
 {
     if (m->mass_n == 0.0f) return;
 
+    // Rolling resistance is limited by this substep's normal impulse, so it
+    // is accumulated per substep rather than carried over.
+    pp_vec3_init(&m->jroll);
+
     PPVec3 P, tmp;
     pp_vec3_scale(&m->n, m->jn, &P);
     pp_vec3_scale(&m->t1, m->jt1, &tmp);
@@ -2558,6 +2858,37 @@ static void pp_solve_contact_friction(PPCollision *m)
         pp_vec3_add(&P, &tmp, &P);
         pp_apply_impulse(lhs, rhs, &m->r1, &m->r2, &P);
         m->jt1 = m->jt2 = 0.0f;
+    }
+
+    if (m->roll_limit > 0.0f && m->jn > 0.0f) {
+        // An angular impulse opposing the relative spin, no larger than the
+        // load allows. +L turns obj2, -L turns obj1, like the linear impulses.
+        PPVec3 w_rel, dir, k1, k2, L;
+        pp_vec3_sub(&rhs->a_vel, &lhs->a_vel, &w_rel);
+        float w = pp_vec3_length(&w_rel);
+        if (w > 1e-6f) {
+            pp_vec3_scale(&w_rel, 1.0f / w, &dir);
+            pp_mat3_mult(&lhs->inv_inertia_world, &dir, &k1);
+            pp_mat3_mult(&rhs->inv_inertia_world, &dir, &k2);
+            float k = pp_vec3_dot(&dir, &k1) + pp_vec3_dot(&dir, &k2);
+            if (k > 1e-8f) {
+                PPVec3 old = m->jroll;
+                pp_vec3_scale(&dir, -w / k, &L);
+                pp_vec3_add(&m->jroll, &L, &m->jroll);
+
+                float limit = m->roll_limit * m->jn;
+                float len = pp_vec3_length(&m->jroll);
+                if (len > limit) {
+                    pp_vec3_scale(&m->jroll, limit / len, &m->jroll);
+                }
+
+                pp_vec3_sub(&m->jroll, &old, &L);
+                pp_mat3_mult(&lhs->inv_inertia_world, &L, &k1);
+                pp_mat3_mult(&rhs->inv_inertia_world, &L, &k2);
+                pp_vec3_sub(&lhs->a_vel, &k1, &lhs->a_vel);
+                pp_vec3_add(&rhs->a_vel, &k2, &rhs->a_vel);
+            }
+        }
     }
 }
 
@@ -2713,7 +3044,15 @@ static void pp_integrate_velocities(float t)
     // Move all bodies by their velocity
     for (int i = 0; i < object_count; ++i) {
         PPBody *body = &objects[i];
-        if (!body->is_alive || body->inv_mass == 0.0f) {
+        if (!body->is_alive || body->is_asleep) {
+            continue;
+        }
+
+        // A body with no mass is moved only if it has been given a velocity:
+        // that is a kinematic body (a lift, a door, a moving platform). It
+        // goes exactly where its velocity takes it and nothing pushes back.
+        if (body->inv_mass == 0.0f && pp_vec3_length_sq(&body->vel) == 0.0f &&
+            pp_vec3_length_sq(&body->a_vel) == 0.0f) {
             continue;
         }
 
@@ -2721,7 +3060,7 @@ static void pp_integrate_velocities(float t)
         // origin, the origin swings around it as the body turns.
         bool offset_com = body->com_local.x != 0.0f || body->com_local.y != 0.0f ||
                           body->com_local.z != 0.0f;
-        PPVec3 com;
+        PPVec3 com = body->pos;
         if (offset_com) {
             pp_body_world_com(body, &com);
         }
@@ -2759,7 +3098,6 @@ static inline void pp_shape_world_pos(const PPBody *body, const PPShape *shape, 
 }
 
 #define PP_MAX_BOX_CONTACTS 8
-#define PP_CONTACT_MARGIN 0.02f
 
 typedef struct _PPBoxContact {
     PPVec3 normal;                   /* unit, points from box A toward box B */
@@ -3141,6 +3479,352 @@ static bool pp_sat_box_box(const PPVec3 *posA, const PPQuaternion *rotA, const P
     return true;
 }
 
+/* ---- capsules ------------------------------------------------------------
+ *
+ * A capsule is a sphere swept along a segment, so every capsule test comes
+ * down to choosing points on that segment and treating each as a sphere. Up to
+ * two are kept per pair, one towards each end of the overlap, which is what
+ * lets a capsule lie flat on something without see-sawing on a single point. */
+
+#define PP_MAX_CAPSULE_CONTACTS 2
+
+typedef struct _PPCapsuleContact {
+    int count;
+    PPVec3 points[PP_MAX_CAPSULE_CONTACTS];      /* on the other shape's surface */
+    PPVec3 normals[PP_MAX_CAPSULE_CONTACTS];     /* unit, capsule -> other shape */
+    float separations[PP_MAX_CAPSULE_CONTACTS];  /* negative when overlapping */
+} PPCapsuleContact;
+
+/* World-space end points of a capsule shape's inner segment. */
+static inline void pp_capsule_segment(const PPBody *body, const PPShape *shape, const PPVec3 *shape_pos,
+                                      PPVec3 *a, PPVec3 *b)
+{
+    PPVec3 up = {.xyz = {0.0f, shape->capsule.half_height, 0.0f}}, axis;
+    pp_quat_transform(&body->rot, &up, &axis);
+    pp_vec3_sub(shape_pos, &axis, a);
+    pp_vec3_add(shape_pos, &axis, b);
+}
+
+static inline void pp_segment_point(const PPVec3 *a, const PPVec3 *b, float t, PPVec3 *out)
+{
+    out->x = a->x + (b->x - a->x) * t;
+    out->y = a->y + (b->y - a->y) * t;
+    out->z = a->z + (b->z - a->z) * t;
+}
+
+/* Parameter of the point on segment ab nearest to p, clamped to [0, 1]. */
+static inline float pp_segment_closest_t(const PPVec3 *a, const PPVec3 *b, const PPVec3 *p)
+{
+    PPVec3 ab, ap;
+    pp_vec3_sub(b, a, &ab);
+    pp_vec3_sub(p, a, &ap);
+    float len_sq = pp_vec3_dot(&ab, &ab);
+    if (len_sq < 1e-12f) return 0.0f;
+    float t = pp_vec3_dot(&ap, &ab) / len_sq;
+    return t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+}
+
+/* Keep a candidate contact: at most two survive, the deepest and whichever
+ * other is farthest from it. Candidates on top of one already kept are
+ * dropped. */
+static void pp_capsule_contact_add(PPCapsuleContact *out, const PPVec3 *point, const PPVec3 *normal,
+                                   float separation, float merge_dist)
+{
+    for (int i = 0; i < out->count; ++i) {
+        PPVec3 d;
+        pp_vec3_sub(point, &out->points[i], &d);
+        if (pp_vec3_length_sq(&d) < merge_dist * merge_dist) {
+            if (separation < out->separations[i]) {
+                out->points[i] = *point;
+                out->normals[i] = *normal;
+                out->separations[i] = separation;
+            }
+            return;
+        }
+    }
+
+    if (out->count < PP_MAX_CAPSULE_CONTACTS) {
+        int k = out->count++;
+        out->points[k] = *point;
+        out->normals[k] = *normal;
+        out->separations[k] = separation;
+        return;
+    }
+
+    // Full: slot 0 is kept as the deepest, slot 1 as the farthest from it.
+    if (separation < out->separations[0]) {
+        PPVec3 tp = out->points[0], tn = out->normals[0];
+        float ts = out->separations[0];
+        out->points[0] = *point; out->normals[0] = *normal; out->separations[0] = separation;
+        point = &tp; normal = &tn; separation = ts;
+
+        PPVec3 d_new, d_old;
+        pp_vec3_sub(point, &out->points[0], &d_new);
+        pp_vec3_sub(&out->points[1], &out->points[0], &d_old);
+        if (pp_vec3_length_sq(&d_new) > pp_vec3_length_sq(&d_old)) {
+            out->points[1] = *point; out->normals[1] = *normal; out->separations[1] = separation;
+        }
+        return;
+    }
+
+    PPVec3 d_new, d_old;
+    pp_vec3_sub(point, &out->points[0], &d_new);
+    pp_vec3_sub(&out->points[1], &out->points[0], &d_old);
+    if (pp_vec3_length_sq(&d_new) > pp_vec3_length_sq(&d_old)) {
+        out->points[1] = *point; out->normals[1] = *normal; out->separations[1] = separation;
+    }
+}
+
+/* A sphere of radius ra at ca against a sphere of radius rb at cb (rb may be
+ * zero: a point on some surface). */
+static void pp_capsule_round_candidate(PPCapsuleContact *out, const PPVec3 *ca, float ra,
+                                       const PPVec3 *cb, float rb, float reach, float merge_dist)
+{
+    PPVec3 n;
+    pp_vec3_sub(cb, ca, &n);
+    float dist = pp_vec3_length(&n);
+    float separation = dist - ra - rb;
+    if (separation > reach) return;
+
+    if (dist > 1e-6f) {
+        pp_vec3_scale(&n, 1.0f / dist, &n);
+    } else {
+        pp_vec3_set(&n, 0.0f, 1.0f, 0.0f);
+    }
+
+    // On the other shape's surface.
+    PPVec3 p = {.xyz = {cb->x - n.x * rb, cb->y - n.y * rb, cb->z - n.z * rb}};
+    pp_capsule_contact_add(out, &p, &n, separation, merge_dist);
+}
+
+/* Capsule (a, b, radius) against a sphere. */
+static void pp_capsule_sphere(const PPVec3 *a, const PPVec3 *b, float radius,
+                              const PPVec3 *centre, float sphere_radius, float reach,
+                              PPCapsuleContact *out)
+{
+    out->count = 0;
+    PPVec3 c;
+    pp_segment_point(a, b, pp_segment_closest_t(a, b, centre), &c);
+    pp_capsule_round_candidate(out, &c, radius, centre, sphere_radius, reach, 0.1f * radius);
+}
+
+/* Capsule against capsule. The closest pair of points covers capsules that
+ * cross; projecting each end onto the other segment covers capsules lying
+ * alongside each other, which need a contact towards each end. */
+static void pp_capsule_capsule(const PPVec3 *a1, const PPVec3 *b1, float r1,
+                               const PPVec3 *a2, const PPVec3 *b2, float r2, float reach,
+                               PPCapsuleContact *out)
+{
+    out->count = 0;
+    float merge = 0.1f * fminf(r1, r2);
+    PPVec3 c1, c2;
+
+    // Closest pair, by alternating projection from the midpoint.
+    float t1 = 0.5f, t2;
+    for (int i = 0; i < 4; ++i) {
+        pp_segment_point(a1, b1, t1, &c1);
+        t2 = pp_segment_closest_t(a2, b2, &c1);
+        pp_segment_point(a2, b2, t2, &c2);
+        t1 = pp_segment_closest_t(a1, b1, &c2);
+    }
+    pp_segment_point(a1, b1, t1, &c1);
+    pp_capsule_round_candidate(out, &c1, r1, &c2, r2, reach, merge);
+
+    const PPVec3 *ends1[2] = {a1, b1};
+    const PPVec3 *ends2[2] = {a2, b2};
+    for (int i = 0; i < 2; ++i) {
+        pp_segment_point(a2, b2, pp_segment_closest_t(a2, b2, ends1[i]), &c2);
+        // Only a true alongside contact: the end must be the nearest point of
+        // its own segment to what it found, or it is just a worse duplicate.
+        if (fabsf(pp_segment_closest_t(a1, b1, &c2) - (float)i) < 1e-3f) {
+            pp_capsule_round_candidate(out, ends1[i], r1, &c2, r2, reach, merge);
+        }
+
+        pp_segment_point(a1, b1, pp_segment_closest_t(a1, b1, ends2[i]), &c1);
+        if (fabsf(pp_segment_closest_t(a2, b2, &c1) - (float)i) < 1e-3f) {
+            pp_capsule_round_candidate(out, &c1, r1, ends2[i], r2, reach, merge);
+        }
+    }
+}
+
+/* A sphere at local-space centre c against a box of half extents he centred on
+ * the origin. Gives the closest point on the box, the normal (sphere -> box)
+ * and the separation. */
+static void pp_sphere_box_local(const PPVec3 *c, float radius, const PPVec3 *he,
+                                PPVec3 *point, PPVec3 *normal, float *separation)
+{
+    PPVec3 q;
+    bool inside = true;
+    for (int k = 0; k < 3; ++k) {
+        float v = c->xyz[k];
+        if (v < -he->xyz[k]) { v = -he->xyz[k]; inside = false; }
+        else if (v > he->xyz[k]) { v = he->xyz[k]; inside = false; }
+        q.xyz[k] = v;
+    }
+
+    if (!inside) {
+        PPVec3 d;
+        pp_vec3_sub(&q, c, &d);
+        float dist = pp_vec3_length(&d);
+        pp_vec3_scale(&d, 1.0f / dist, normal);
+        *point = q;
+        *separation = dist - radius;
+        return;
+    }
+
+    // Centre inside the box: leave by the nearest face.
+    int axis = 0;
+    float best = FLT_MAX;
+    for (int k = 0; k < 3; ++k) {
+        float depth = he->xyz[k] - fabsf(c->xyz[k]);
+        if (depth < best) { best = depth; axis = k; }
+    }
+
+    float sign = (c->xyz[axis] >= 0.0f) ? 1.0f : -1.0f;
+    pp_vec3_set(normal, 0.0f, 0.0f, 0.0f);
+    normal->xyz[axis] = -sign;
+    *point = *c;
+    point->xyz[axis] = sign * he->xyz[axis];
+    *separation = -(best + radius);
+}
+
+/* Capsule against an oriented box. */
+static void pp_capsule_box(const PPVec3 *a, const PPVec3 *b, float radius,
+                           const PPVec3 *box_pos, const PPQuaternion *box_rot, const PPVec3 *he,
+                           float reach, PPCapsuleContact *out)
+{
+    out->count = 0;
+
+    // Work in the box's frame.
+    PPQuaternion inv;
+    pp_quat_conjugate(box_rot, &inv);
+    PPVec3 la, lb, tmp;
+    pp_vec3_sub(a, box_pos, &tmp); pp_quat_transform(&inv, &tmp, &la);
+    pp_vec3_sub(b, box_pos, &tmp); pp_quat_transform(&inv, &tmp, &lb);
+
+    // Nearest point of the segment to the box, by alternating projection
+    // (both are convex, so this converges; a few rounds is plenty).
+    PPVec3 origin = {.xyz = {0.0f, 0.0f, 0.0f}}, c, q;
+    float t = pp_segment_closest_t(&la, &lb, &origin);
+    for (int i = 0; i < 4; ++i) {
+        pp_segment_point(&la, &lb, t, &c);
+        for (int k = 0; k < 3; ++k) {
+            q.xyz[k] = fminf(fmaxf(c.xyz[k], -he->xyz[k]), he->xyz[k]);
+        }
+        t = pp_segment_closest_t(&la, &lb, &q);
+    }
+
+    float ts[3] = {t, t, t};
+    int tn = 1;
+
+    PPVec3 point, normal;
+    float separation;
+    pp_segment_point(&la, &lb, t, &c);
+    pp_sphere_box_local(&c, radius, he, &point, &normal, &separation);
+    if (separation > reach) return;
+
+    // The stretch of the segment lying over the face it faces: clip it to the
+    // box's extent along the axes the normal is NOT pointing along. Its two
+    // ends are the other candidates.
+    float t0 = 0.0f, t1 = 1.0f;
+    for (int k = 0; k < 3 && t0 <= t1; ++k) {
+        if (fabsf(normal.xyz[k]) > 0.7f) continue;
+
+        float pa = la.xyz[k], d = lb.xyz[k] - la.xyz[k], h = he->xyz[k];
+        if (fabsf(d) < 1e-8f) {
+            if (pa < -h || pa > h) t0 = 2.0f; // wholly outside this slab
+            continue;
+        }
+        float ta = (-h - pa) / d, tb = (h - pa) / d;
+        if (ta > tb) { float sw = ta; ta = tb; tb = sw; }
+        if (ta > t0) t0 = ta;
+        if (tb < t1) t1 = tb;
+    }
+    if (t0 <= t1) {
+        ts[tn++] = t0;
+        ts[tn++] = t1;
+    }
+
+    float merge = 0.1f * radius;
+    for (int i = 0; i < tn; ++i) {
+        pp_segment_point(&la, &lb, ts[i], &c);
+        pp_sphere_box_local(&c, radius, he, &point, &normal, &separation);
+        if (separation > reach) continue;
+
+        PPVec3 wp, wn;
+        pp_quat_transform(box_rot, &point, &wp);
+        pp_vec3_add(&wp, box_pos, &wp);
+        pp_quat_transform(box_rot, &normal, &wn);
+        pp_capsule_contact_add(out, &wp, &wn, separation, merge);
+    }
+}
+
+/* Capsule against a one-sided triangle. Like the sphere test, only the face
+ * counts: a point of the segment touches the triangle if it lies over it. That
+ * keeps a capsule gliding across the seams of a mesh instead of catching on
+ * every shared edge. The segment is clipped to the part lying over the
+ * triangle, and the two ends of that part are the candidates. `vel` and
+ * `a_vel` about `com` give each candidate's approach speed for the speculative
+ * test. */
+static void pp_capsule_triangle(const PPVec3 *a, const PPVec3 *b, float radius,
+                                const PPTriangle *tri, const PPVec3 *vel, const PPVec3 *a_vel,
+                                const PPVec3 *com, float t, PPCapsuleContact *out)
+{
+    out->count = 0;
+    const PPVec3 *n = &tri->n;
+
+    float t0 = 0.0f, t1 = 1.0f;
+    for (int e = 0; e < 3; ++e) {
+        const PPVec3 *va = &tri->v[e];
+        const PPVec3 *vb = &tri->v[(e + 1) % 3];
+        const PPVec3 *opp = &tri->v[(e + 2) % 3];
+
+        PPVec3 edge, m, to_opp;
+        pp_vec3_sub(vb, va, &edge);
+        pp_vec3_cross(&edge, n, &m);
+        pp_vec3_sub(opp, va, &to_opp);
+        if (pp_vec3_dot(&m, &to_opp) > 0.0f) {
+            pp_vec3_neg(&m, &m); // outward
+        }
+
+        float fa = pp_dot_rel(a, va, &m);
+        float fb = pp_dot_rel(b, va, &m);
+        if (fa > 0.0f && fb > 0.0f) return; // wholly outside this edge
+        if (fa > 0.0f) {
+            float tc = fa / (fa - fb);
+            if (tc > t0) t0 = tc;
+        } else if (fb > 0.0f) {
+            float tc = fa / (fa - fb);
+            if (tc < t1) t1 = tc;
+        }
+        if (t0 > t1) return;
+    }
+
+    float ts[2] = {t0, t1};
+    for (int i = 0; i < 2; ++i) {
+        PPVec3 c;
+        pp_segment_point(a, b, ts[i], &c);
+
+        float dist = pp_dot_rel(&c, &tri->v[0], n);
+        if (dist <= 0.0f) continue; // behind the face: one-sided
+
+        float separation = dist - radius;
+        if (separation > PP_CONTACT_MARGIN) {
+            PPVec3 r, pv;
+            pp_vec3_sub(&c, com, &r);
+            pp_vec3_cross(a_vel, &r, &pv);
+            pp_vec3_add(&pv, vel, &pv);
+            float approach = -pp_vec3_dot(&pv, n);
+            if (approach <= 0.0f || separation > approach * t) continue;
+        }
+
+        PPVec3 p = {.xyz = {c.x - n->x * dist, c.y - n->y * dist, c.z - n->z * dist}};
+        PPVec3 cn;
+        pp_vec3_neg(n, &cn);
+        pp_capsule_contact_add(out, &p, &cn, separation, 0.1f * radius);
+    }
+}
+
 /* A box lying across several coplanar triangles collects a clipped polygon
  * from each one, so a single flat face can end up with a dozen unevenly spread
  * contacts. Besides the solver cost, the lopsided distribution makes a soft,
@@ -3364,6 +4048,140 @@ static int pp_sat_box_triangle(const PPVec3 *box_pos, const PPQuaternion *box_ro
     return out->count;
 }
 
+/* Turn a capsule test's result into solver contacts. The capsule is obj1. */
+static int pp_emit_capsule_contacts(PPCollision *manifolds, int manifold_count,
+                                    const PPCapsuleContact *cc, const PPCollision *rep)
+{
+    for (int k = 0; k < cc->count && manifold_count < PICOPHYSICS_MAX_MANIFOLDS; ++k) {
+        PPCollision c = *rep;
+        c.p = cc->points[k];
+        c.n = cc->normals[k];
+        c.dist = -cc->separations[k];
+        c.separation = cc->separations[k];
+        manifolds[manifold_count++] = c;
+    }
+    return manifold_count;
+}
+
+/* The contact handed to a collision callback for a capsule pair: the deepest. */
+static void pp_capsule_rep(const PPCapsuleContact *cc, PPBody *capsule_body, const PPShape *capsule_shape,
+                           PPBody *other_body, PPObjectType other_type, BodyKind other_kind,
+                           float other_bounce, float other_friction, PPCollision *rep)
+{
+    int deepest = 0;
+    for (int k = 1; k < cc->count; ++k) {
+        if (cc->separations[k] < cc->separations[deepest]) deepest = k;
+    }
+
+    memset(rep, 0, sizeof(*rep));
+    rep->p = cc->points[deepest];
+    rep->n = cc->normals[deepest];
+    rep->dist = -cc->separations[deepest];
+    rep->separation = cc->separations[deepest];
+    rep->obj1 = capsule_body;
+    rep->obj2 = other_body;
+    rep->obj1_bounce = capsule_body->bounce;
+    rep->obj2_bounce = other_bounce;
+    rep->obj1_friction = capsule_body->friction;
+    rep->obj2_friction = other_friction;
+    rep->type1 = PP_OBJECT_TYPE_CAPSULE;
+    rep->type2 = other_type;
+    rep->kind1 = capsule_shape->kind;
+    rep->kind2 = other_kind;
+    rep->roll_radius = capsule_shape->capsule.radius;
+}
+
+static int pp_sleep_find(int *parent, int i)
+{
+    while (parent[i] != i) {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+    }
+    return i;
+}
+
+static inline int pp_body_index(const PPBody *b)
+{
+    return (b >= objects && b < objects + PICOPHYSICS_MAX_OBJECTS) ? (int)(b - objects) : -1;
+}
+
+/* Decide who goes to sleep. Bodies joined by contacts or constraints form a
+ * group, and a group sleeps only when every member has been still for
+ * sleep_delay: one restless body keeps the pile it is touching awake, which is
+ * what stops a stack from freezing mid-collapse. */
+static void pp_update_sleeping(const PPCollision *manifolds, int manifold_count, float t)
+{
+    static int parent[PICOPHYSICS_MAX_OBJECTS];
+    static float group_time[PICOPHYSICS_MAX_OBJECTS];
+    static uint32_t group_id[PICOPHYSICS_MAX_OBJECTS];
+
+    const float lin_sq = sleep_linear_threshold * sleep_linear_threshold;
+    const float ang_sq = sleep_angular_threshold * sleep_angular_threshold;
+
+    for (int i = 0; i < object_count; ++i) {
+        PPBody *b = &objects[i];
+        parent[i] = i;
+
+        if (!b->is_alive || b->is_asleep || b->inv_mass == 0.0f) continue;
+
+        if (!b->never_sleeps && pp_vec3_length_sq(&b->vel) < lin_sq &&
+            pp_vec3_length_sq(&b->a_vel) < ang_sq) {
+            b->sleep_time += t;
+        } else {
+            b->sleep_time = 0.0f;
+        }
+    }
+
+    // Only moving bodies tie a group together; a static or kinematic body
+    // that two piles both rest on does not make them one pile.
+    for (int i = 0; i < manifold_count; ++i) {
+        int a = pp_body_index(manifolds[i].obj1);
+        int b = pp_body_index(manifolds[i].obj2);
+        if (a < 0 || b < 0) continue;
+        if (objects[a].inv_mass == 0.0f || objects[b].inv_mass == 0.0f) continue;
+        parent[pp_sleep_find(parent, a)] = pp_sleep_find(parent, b);
+    }
+
+    for (int i = 0; i < constraint_count; ++i) {
+        const PPConstraint *c = &constraints[i];
+        if (!c->is_alive) continue;
+        int a = pp_body_index(c->body1);
+        int b = pp_body_index(c->body2);
+        if (a < 0 || b < 0) continue;
+        if (objects[a].inv_mass == 0.0f || objects[b].inv_mass == 0.0f) continue;
+        parent[pp_sleep_find(parent, a)] = pp_sleep_find(parent, b);
+    }
+
+    for (int i = 0; i < object_count; ++i) {
+        group_time[i] = FLT_MAX;
+        group_id[i] = 0;
+    }
+
+    for (int i = 0; i < object_count; ++i) {
+        const PPBody *b = &objects[i];
+        if (!b->is_alive || b->is_asleep || b->inv_mass == 0.0f) continue;
+        int root = pp_sleep_find(parent, i);
+        if (b->sleep_time < group_time[root]) group_time[root] = b->sleep_time;
+    }
+
+    for (int i = 0; i < object_count; ++i) {
+        PPBody *b = &objects[i];
+        if (!b->is_alive || b->is_asleep || b->inv_mass == 0.0f) continue;
+
+        int root = pp_sleep_find(parent, i);
+        if (group_time[root] < sleep_delay) continue;
+
+        if (group_id[root] == 0) {
+            group_id[root] = ++sleep_group_counter;
+        }
+
+        b->sleep_group = group_id[root];
+        b->is_asleep = true;
+        pp_vec3_init(&b->vel);
+        pp_vec3_init(&b->a_vel);
+    }
+}
+
 void pp_physics_step(float t, int vel_iterations, int pos_iterations)
 {
     int manifold_count = 0;
@@ -3379,7 +4197,7 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
     tri_query_max_candidates = 0;
 
     for (int i = 0; i < object_count; ++i) {
-        if (objects[i].is_alive && objects[i].inv_mass != 0.0f) {
+        if (objects[i].is_alive && objects[i].inv_mass != 0.0f && !objects[i].is_asleep) {
             pp_body_update_world_inertia(&objects[i]);
         }
     }
@@ -3395,6 +4213,37 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
         }
     }
 
+    // Wake sleepers that something moving is about to reach. Done before
+    // detection so that a woken body gets its full set of contacts this step,
+    // and on bounding spheres so that it happens a frame ahead of the impact.
+    // Only a body that is actually moving counts: one that is merely awake and
+    // resting nearby must not keep its neighbours up.
+    if (sleeping_enabled) {
+        for (int i = 0; i < object_count; ++i) {
+            PPBody *mover = &objects[i];
+            if (!mover->is_alive || mover->is_asleep || mover->shape_count == 0) continue;
+
+            bool moving;
+            if (mover->inv_mass == 0.0f) {
+                moving = pp_vec3_length_sq(&mover->vel) > 0.0f ||
+                         pp_vec3_length_sq(&mover->a_vel) > 0.0f;
+            } else {
+                moving = mover->sleep_time == 0.0f;
+            }
+            if (!moving) continue;
+
+            for (int j = 0; j < object_count; ++j) {
+                PPBody *sleeper = &objects[j];
+                if (!sleeper->is_alive || !sleeper->is_asleep || sleeper->shape_count == 0) continue;
+
+                float pair_reach = body_reach[i] + body_reach[j];
+                if (pp_vec3_dist_sq(&mover->pos, &sleeper->pos) <= pair_reach * pair_reach) {
+                    pp_body_wake(sleeper);
+                }
+            }
+        }
+    }
+
     for (int i = 0; i < object_count; ++i) {
         PPBody *lhs_body = &objects[i];
 
@@ -3405,20 +4254,33 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
         const struct _PPCollisionMapEntry *cb = NULL;
 
         // Shape/triangle collisions: iterate shapes of this body. Spheres and
-        // boxes both collide with the static triangle soup.
-        for (int si = 0; si < lhs_body->shape_count; ++si) {
+        // boxes both collide with the static triangle soup. A sleeping body
+        // is not being simulated, so it has no use for contacts.
+        for (int si = 0; si < lhs_body->shape_count && !lhs_body->is_asleep; ++si) {
             const PPShape *lhs_shape = &lhs_body->shapes[si];
             if (lhs_shape->type != PP_OBJECT_TYPE_SPHERE &&
-                lhs_shape->type != PP_OBJECT_TYPE_BOX) {
+                lhs_shape->type != PP_OBJECT_TYPE_BOX &&
+                lhs_shape->type != PP_OBJECT_TYPE_CAPSULE) {
                 continue;
             }
 
             PPVec3 shape_pos;
             pp_shape_world_pos(lhs_body, lhs_shape, &shape_pos);
 
-            float radius = (lhs_shape->type == PP_OBJECT_TYPE_SPHERE)
-                               ? lhs_shape->sphere.radius
-                               : lhs_shape->box.bounding_radius;
+            float radius;
+            if (lhs_shape->type == PP_OBJECT_TYPE_SPHERE) {
+                radius = lhs_shape->sphere.radius;
+            } else if (lhs_shape->type == PP_OBJECT_TYPE_CAPSULE) {
+                radius = lhs_shape->capsule.radius + lhs_shape->capsule.half_height;
+            } else {
+                radius = lhs_shape->box.bounding_radius;
+            }
+
+            PPVec3 cap_a, cap_b, cap_com;
+            if (lhs_shape->type == PP_OBJECT_TYPE_CAPSULE) {
+                pp_capsule_segment(lhs_body, lhs_shape, &shape_pos, &cap_a, &cap_b);
+                pp_body_world_com(lhs_body, &cap_com);
+            }
             float pos_x = shape_pos.x;
             float pos_y = shape_pos.y;
             float pos_z = shape_pos.z;
@@ -3529,6 +4391,57 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                             }
                         }
                     }
+                } else if (lhs_shape->type == PP_OBJECT_TYPE_CAPSULE) {
+                    PPCapsuleContact cc;
+                    pp_capsule_triangle(&cap_a, &cap_b, lhs_shape->capsule.radius, tri,
+                                        &lhs_body->vel, &lhs_body->a_vel, &cap_com, t, &cc);
+                    if (cc.count > 0) {
+                        PPCollision rep;
+                        pp_capsule_rep(&cc, lhs_body, lhs_shape, &trimesh_body,
+                                       PP_OBJECT_TYPE_TRIANGLE, tri->kind,
+                                       tri->bounce, tri->friction, &rep);
+
+                        bool respond = true;
+                        if (cb) {
+                            respond = cb->collision_callback(lhs_body, tri,
+                                                             lhs_shape->kind, tri->kind,
+                                                             &rep, cb->user_data);
+                        }
+
+                        if (respond) {
+                            // A capsule lying across a shared edge gets the
+                            // same point from both triangles; keep one.
+                            PPCapsuleContact unique;
+                            unique.count = 0;
+                            for (int k = 0; k < cc.count; ++k) {
+                                bool dup = false;
+                                for (int e = 0; e < emitted_count; ++e) {
+                                    PPVec3 diff;
+                                    pp_vec3_sub(&cc.points[k], &emitted_pt[e], &diff);
+                                    if (pp_vec3_length_sq(&diff) < 1e-4f &&
+                                        pp_vec3_dot(&cc.normals[k], &emitted_n[e]) > 0.999f) {
+                                        dup = true;
+                                        break;
+                                    }
+                                }
+                                if (dup) continue;
+
+                                if (emitted_count < 32) {
+                                    emitted_pt[emitted_count] = cc.points[k];
+                                    emitted_n[emitted_count] = cc.normals[k];
+                                    emitted_count++;
+                                }
+
+                                unique.points[unique.count] = cc.points[k];
+                                unique.normals[unique.count] = cc.normals[k];
+                                unique.separations[unique.count] = cc.separations[k];
+                                unique.count++;
+                            }
+
+                            manifold_count = pp_emit_capsule_contacts(manifolds, manifold_count,
+                                                                      &unique, &rep);
+                        }
+                    }
                 } else {
                     // Box vs triangle via SAT, one-sided, with a clipped
                     // multi-point manifold and speculative contacts.
@@ -3598,7 +4511,7 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                     }
                 }
             }
-            if (lhs_shape->type == PP_OBJECT_TYPE_BOX) {
+            if (lhs_shape->type == PP_OBJECT_TYPE_BOX || lhs_shape->type == PP_OBJECT_TYPE_CAPSULE) {
                 manifold_count = pp_reduce_box_mesh_contacts(manifolds, shape_first_manifold,
                                                              manifold_count);
             }
@@ -3609,6 +4522,13 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
             PPBody *rhs_body = &objects[j];
 
             if (!rhs_body->is_alive || rhs_body->shape_count == 0) {
+                continue;
+            }
+
+            // A sleeping body against another sleeper, or against something
+            // that cannot move, has nothing to resolve.
+            if ((lhs_body->is_asleep && (rhs_body->is_asleep || rhs_body->inv_mass == 0.0f)) ||
+                (rhs_body->is_asleep && lhs_body->inv_mass == 0.0f)) {
                 continue;
             }
 
@@ -3633,7 +4553,56 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                         continue;
                     }
 
-                    if (lhs_shape->type == PP_OBJECT_TYPE_SPHERE && rhs_shape->type == PP_OBJECT_TYPE_SPHERE) {
+                    if (lhs_shape->type == PP_OBJECT_TYPE_CAPSULE || rhs_shape->type == PP_OBJECT_TYPE_CAPSULE) {
+                        // The capsule is always obj1 of the contact.
+                        bool lhs_is_capsule = lhs_shape->type == PP_OBJECT_TYPE_CAPSULE;
+                        PPBody *cap_body = lhs_is_capsule ? lhs_body : rhs_body;
+                        PPBody *other_body = lhs_is_capsule ? rhs_body : lhs_body;
+                        const PPShape *cap_shape = lhs_is_capsule ? lhs_shape : rhs_shape;
+                        const PPShape *other_shape = lhs_is_capsule ? rhs_shape : lhs_shape;
+                        const PPVec3 *cap_pos = lhs_is_capsule ? &lhs_spos : &rhs_spos;
+                        const PPVec3 *other_pos = lhs_is_capsule ? &rhs_spos : &lhs_spos;
+
+                        PPVec3 rel_v, ca, cbp;
+                        pp_vec3_sub(&rhs_body->vel, &lhs_body->vel, &rel_v);
+                        float reach = PP_CONTACT_MARGIN + pp_vec3_length(&rel_v) * t;
+                        pp_capsule_segment(cap_body, cap_shape, cap_pos, &ca, &cbp);
+
+                        PPCapsuleContact cc;
+                        cc.count = 0;
+                        if (other_shape->type == PP_OBJECT_TYPE_SPHERE) {
+                            pp_capsule_sphere(&ca, &cbp, cap_shape->capsule.radius,
+                                              other_pos, other_shape->sphere.radius, reach, &cc);
+                        } else if (other_shape->type == PP_OBJECT_TYPE_CAPSULE) {
+                            PPVec3 oa, ob;
+                            pp_capsule_segment(other_body, other_shape, other_pos, &oa, &ob);
+                            pp_capsule_capsule(&ca, &cbp, cap_shape->capsule.radius,
+                                               &oa, &ob, other_shape->capsule.radius, reach, &cc);
+                        } else if (other_shape->type == PP_OBJECT_TYPE_BOX) {
+                            pp_capsule_box(&ca, &cbp, cap_shape->capsule.radius,
+                                           other_pos, &other_body->rot, &other_shape->box.half_extents,
+                                           reach, &cc);
+                        }
+
+                        if (cc.count > 0) {
+                            PPCollision rep;
+                            pp_capsule_rep(&cc, cap_body, cap_shape, other_body,
+                                           other_shape->type, other_shape->kind,
+                                           other_body->bounce, other_body->friction, &rep);
+
+                            bool respond = true;
+                            if (cb) {
+                                respond = cb->collision_callback(cap_body, other_body,
+                                                                 cap_shape->kind, other_shape->kind,
+                                                                 &rep, cb->user_data);
+                            }
+
+                            if (respond) {
+                                manifold_count = pp_emit_capsule_contacts(manifolds, manifold_count,
+                                                                          &cc, &rep);
+                            }
+                        }
+                    } else if (lhs_shape->type == PP_OBJECT_TYPE_SPHERE && rhs_shape->type == PP_OBJECT_TYPE_SPHERE) {
                         float dist = pp_vec3_dist_sq(&lhs_spos, &rhs_spos);
                         float radius_sum = lhs_shape->sphere.radius + rhs_shape->sphere.radius;
                         float reach_sum = radius_sum + PP_CONTACT_MARGIN;
@@ -3759,6 +4728,14 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
         }
     }
 
+    // An awake body found touching a sleeper (one that was itself woken at
+    // rest, say, so the pre-pass above did not count it as moving): the
+    // sleeper has to take part.
+    for (int i = 0; i < manifold_count; ++i) {
+        if (manifolds[i].obj1->is_asleep) pp_body_wake(manifolds[i].obj1);
+        if (manifolds[i].obj2->is_asleep) pp_body_wake(manifolds[i].obj2);
+    }
+
     for (int i = 0; i < manifold_count; ++i) {
         pp_prepare_contact(&manifolds[i], t);
         pp_match_contact(&manifolds[i]);
@@ -3849,11 +4826,21 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
         }
     }
 
-    // Remember the solved impulses for the next step's warm start.
-    contact_cache_count = manifold_count;
-    for (int i = 0; i < manifold_count; ++i) {
+    // Remember the solved impulses for the next step's warm start. Entries
+    // belonging to sleeping bodies are carried over untouched, so a pile that
+    // is woken picks up exactly where it left off.
+    int kept = 0;
+    for (int i = 0; i < contact_cache_count; ++i) {
+        const PPContactCache *c = &contact_cache[i];
+        if (!c->used && (c->obj1->is_asleep || c->obj2->is_asleep)) {
+            contact_cache[kept++] = *c;
+        }
+    }
+
+    contact_cache_count = kept;
+    for (int i = 0; i < manifold_count && contact_cache_count < PICOPHYSICS_MAX_MANIFOLDS; ++i) {
         const PPCollision *m = &manifolds[i];
-        PPContactCache *c = &contact_cache[i];
+        PPContactCache *c = &contact_cache[contact_cache_count++];
         c->obj1 = m->obj1;
         c->obj2 = m->obj2;
         c->r1 = m->r1;
@@ -3869,6 +4856,10 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
             c->jt2 = m->jt2;
         }
         c->used = false;
+    }
+
+    if (sleeping_enabled) {
+        pp_update_sleeping(manifolds, manifold_count, t);
     }
 
     // Contacts are pushed out by the substeps above; only the constraints
