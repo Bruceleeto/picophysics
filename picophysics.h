@@ -132,6 +132,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* See "Maths back-end" below. */
+#ifdef PICOPHYSICS_USE_SH4ZAM
+#include <sh4zam/shz_scalar.h>
+#include <sh4zam/shz_trig.h>
+#include <sh4zam/shz_vector.h>
+#include <sh4zam/shz_quat.h>
+#include <sh4zam/shz_matrix.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -402,6 +411,57 @@ PPVec3 *pp_vec3_set(PPVec3 *v, float x, float y, float z);
 PPVec3 *pp_vec3_assign(PPVec3 *target, const PPVec3 *source);
 bool pp_vec3_normalize(PPVec3 *target);
 
+/* ---- Maths back-end -------------------------------------------------------
+ *
+ * Every square root, reciprocal, trig call and the hot vector operations go
+ * through the pp_ wrappers below, so that a platform's fast paths can be
+ * swapped in from one place.
+ *
+ * Define PICOPHYSICS_USE_SH4ZAM (and have SH4ZAM's include directory on the
+ * include path) to route them through SH4ZAM: on a Dreamcast that means FSRRA
+ * for 1/sqrt and 1/x and FIPR for dot products; anywhere else SH4ZAM falls
+ * back to plain C, which is what lets the same build be unit tested on a PC.
+ * Without the define this header depends on nothing but libm. */
+#ifdef PICOPHYSICS_USE_SH4ZAM
+
+#define pp_sqrtf(x)     shz_sqrtf(x)
+#define pp_inv_sqrtf(x) shz_inv_sqrtf(x)
+#define pp_invf(x)      shz_invf(x)
+#define pp_sinf(x)      shz_sinf(x)
+#define pp_cosf(x)      shz_cosf(x)
+/* shz_acosf() is an approximation good to about 0.01 rad. Nothing in the step
+ * calls acos -- only slerp and the angle helpers -- so accuracy wins here. */
+#define pp_acosf(x)     acosf(x)
+#define pp_atan2f(y, x) shz_atan2f((y), (x))
+
+static inline shz_vec3_t pp_to_shz(const PPVec3 *v)
+{
+    return shz_vec3_init(v->x, v->y, v->z);
+}
+
+static inline float pp_vec3_length(const PPVec3 *v1)
+{
+    // Not shz_vec3_magnitude(): that is 1/sqrt(x) * x with no guard, which is
+    // NaN for a zero vector, and a body at rest has a zero velocity.
+    shz_vec3_t v = pp_to_shz(v1);
+    return shz_sqrtf(shz_vec3_dot(v, v));
+}
+
+static inline float pp_vec3_dot(const PPVec3 *v1, const PPVec3 *v2)
+{
+    return shz_vec3_dot(pp_to_shz(v1), pp_to_shz(v2));
+}
+
+#else
+
+#define pp_sqrtf(x)     sqrtf(x)
+#define pp_inv_sqrtf(x) (1.0f / sqrtf(x))
+#define pp_invf(x)      (1.0f / (x))
+#define pp_sinf(x)      sinf(x)
+#define pp_cosf(x)      cosf(x)
+#define pp_acosf(x)     acosf(x)
+#define pp_atan2f(y, x) atan2f((y), (x))
+
 static inline float pp_vec3_length(const PPVec3 *v1)
 {
     return sqrtf(v1->x * v1->x + v1->y * v1->y + v1->z * v1->z);
@@ -411,6 +471,8 @@ static inline float pp_vec3_dot(const PPVec3 *v1, const PPVec3 *v2)
 {
     return v1->x * v2->x + v1->y * v2->y + v1->z * v2->z;
 }
+
+#endif
 
 static inline PPVec3 *pp_vec3_scale(const PPVec3 *v1, float t, PPVec3 *out)
 {
@@ -828,6 +890,13 @@ static inline float pp_vec3_dist_sq(const PPVec3 *v1, const PPVec3 *v2)
 
 static inline PPVec3 *pp_vec3_cross(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *out)
 {
+#ifdef PICOPHYSICS_USE_SH4ZAM
+    shz_vec3_t c = shz_vec3_cross(pp_to_shz(v1), pp_to_shz(v2));
+    out->x = c.x;
+    out->y = c.y;
+    out->z = c.z;
+    return out;
+#else
     assert(v1 != out);
     assert(v2 != out);
 
@@ -835,15 +904,16 @@ static inline PPVec3 *pp_vec3_cross(const PPVec3 *v1, const PPVec3 *v2, PPVec3 *
     out->y = v1->z * v2->x - v1->x * v2->z;
     out->z = v1->x * v2->y - v1->y * v2->x;
     return out;
+#endif
 }
 
 bool pp_vec3_normalize(PPVec3 *v)
 {
-    float length = pp_vec3_length(v);
+    float length_sq = pp_vec3_dot(v, v);
 
     // Check for zero-length vector to avoid division by zero
-    if (length > 0.0f) {
-        float inv_length = 1.0f / length;
+    if (length_sq > 0.0f) {
+        float inv_length = pp_inv_sqrtf(length_sq);
         v->x *= inv_length;
         v->y *= inv_length;
         v->z *= inv_length;
@@ -876,7 +946,7 @@ void pp_mat3_inverse(const PPMat3 *in, PPMat3 *out)
     // Determinant
     float det = a * A + d * D + g * G;
 
-    float inv_det = 1.0f / det;
+    float inv_det = pp_invf(det);
 
     // Adjugate (still column-major)
     out->m[0] = A * inv_det;
@@ -894,6 +964,13 @@ void pp_mat3_inverse(const PPMat3 *in, PPMat3 *out)
 
 void pp_mat3_mult(const PPMat3 *m, const PPVec3 *p, PPVec3 *pout)
 {
+#ifdef PICOPHYSICS_USE_SH4ZAM
+    // Same column-major layout, so the matrix can be used where it lies.
+    shz_vec3_t r = shz_mat3x3_transform_vec3((const shz_mat3x3_t *) m->m, pp_to_shz(p));
+    pout->x = r.x;
+    pout->y = r.y;
+    pout->z = r.z;
+#else
     float x = p->x;
     float y = p->y;
     float z = p->z;
@@ -901,6 +978,7 @@ void pp_mat3_mult(const PPMat3 *m, const PPVec3 *p, PPVec3 *pout)
     pout->x = m->m[0] * x + m->m[3] * y + m->m[6] * z;
     pout->y = m->m[1] * x + m->m[4] * y + m->m[7] * z;
     pout->z = m->m[2] * x + m->m[5] * y + m->m[8] * z;
+#endif
 }
 
 PPQuaternion *pp_quat_init(PPQuaternion *q)
@@ -936,8 +1014,8 @@ void pp_quat_from_angular_velocity(const PPVec3 *a_vel, float dt, PPQuaternion *
         pp_vec3_normalize(&axis); // Normalize the angular velocity to get the axis of rotation
 
         // Calculate sine and cosine of the half angle
-        float sin_half_angle = sinf(angle / 2);
-        float cos_half_angle = cosf(angle / 2);
+        float sin_half_angle = pp_sinf(angle / 2);
+        float cos_half_angle = pp_cosf(angle / 2);
 
         // Create the quaternion
         q_rot->x = axis.xyz[0] * sin_half_angle;
@@ -964,24 +1042,35 @@ void pp_quat_multiply(const PPQuaternion *q1, const PPQuaternion *q2, PPQuaterni
 float pp_quat_angle_between(const PPQuaternion *q1, const PPQuaternion *q2)
 {
     float dot = q1->w * q2->w + q1->x * q2->x + q1->y * q2->y + q1->z * q2->z;
-    return acosf(dot) * 2.0f;
+    return pp_acosf(dot) * 2.0f;
 }
 
 void pp_quat_transform(const PPQuaternion *q, const PPVec3 *v, PPVec3 *ret)
 {
-    PPQuaternion conjugate, vq, temp, v_rot_q;
-    pp_quat_set(&conjugate, -q->x, -q->y, -q->z, q->w);
-    pp_quat_set(&vq, v->x, v->y, v->z, 0.0f);
-    pp_quat_multiply(q, &vq, &temp);
-    pp_quat_multiply(&temp, &conjugate, &v_rot_q);
-    pp_vec3_set(ret, v_rot_q.x, v_rot_q.y, v_rot_q.z);
+#ifdef PICOPHYSICS_USE_SH4ZAM
+    shz_vec3_t r = shz_quat_transform_vec3(shz_quat_init(q->w, q->x, q->y, q->z), pp_to_shz(v));
+    pp_vec3_set(ret, r.x, r.y, r.z);
+#else
+    // v + 2w (u x v) + 2 u x (u x v), with u the vector part: the same result
+    // as q v q* for a unit quaternion at a third of the multiplies.
+    float tx = q->y * v->z - q->z * v->y;
+    float ty = q->z * v->x - q->x * v->z;
+    float tz = q->x * v->y - q->y * v->x;
+    float ux = q->y * tz - q->z * ty;
+    float uy = q->z * tx - q->x * tz;
+    float uz = q->x * ty - q->y * tx;
+    pp_vec3_set(ret,
+                v->x + 2.0f * (q->w * tx + ux),
+                v->y + 2.0f * (q->w * ty + uy),
+                v->z + 2.0f * (q->w * tz + uz));
+#endif
 }
 
 void pp_quat_normalize(PPQuaternion *q)
 {
-    float norm = sqrtf(q->x * q->x + q->y * q->y + q->z * q->z + q->w * q->w);
-    if (norm > 0) {
-        float inv_norm = 1.0f / norm;
+    float norm_sq = q->x * q->x + q->y * q->y + q->z * q->z + q->w * q->w;
+    if (norm_sq > 0) {
+        float inv_norm = pp_inv_sqrtf(norm_sq);
         q->x *= inv_norm;
         q->y *= inv_norm;
         q->z *= inv_norm;
@@ -1065,15 +1154,15 @@ void pp_quat_between(const PPVec3 *v0, const PPVec3 *v1, PPQuaternion *result)
     pp_vec3_normalize(&axis);
 
     // Calculate the angle of rotation
-    float angle = acosf(dot);
+    float angle = pp_acosf(dot);
 
     // Calculate the quaternion
     float half_angle = angle * 0.5f;
-    float sin_half_angle = sinf(half_angle);
+    float sin_half_angle = pp_sinf(half_angle);
     result->x = axis.xyz[0] * sin_half_angle;
     result->y = axis.xyz[1] * sin_half_angle;
     result->z = axis.xyz[2] * sin_half_angle;
-    result->w = cosf(half_angle);
+    result->w = pp_cosf(half_angle);
 }
 
 void pp_quat_slerp(const PPQuaternion *q0, const PPQuaternion *q1, float t, PPQuaternion *result)
@@ -1101,12 +1190,12 @@ void pp_quat_slerp(const PPQuaternion *q0, const PPQuaternion *q1, float t, PPQu
     }
 
     // Calculate the angle between the quaternions
-    float theta = acosf(dot);
+    float theta = pp_acosf(dot);
 
     // Calculate the coefficients for spherical linear interpolation
-    float sin_theta = sinf(theta);
-    float s0 = sinf((1.0f - t) * theta) / sin_theta;
-    float s1 = sinf(t * theta) / sin_theta;
+    float sin_theta = pp_sinf(theta);
+    float s0 = pp_sinf((1.0f - t) * theta) / sin_theta;
+    float s1 = pp_sinf(t * theta) / sin_theta;
 
     // Perform the interpolation
     result->x = s0 * q0->x + s1 * q1_temp.xyzw[0];
@@ -1147,7 +1236,7 @@ bool pp_capsule_intersect(const PPVec3 *a, const PPVec3 *b, float radius,
     pp_vec3_sub(b, a, &u);
     float len = pp_vec3_length(&u);
     if (len > 1e-6f) {
-        pp_vec3_scale(&u, 1.0f / len, &u);
+        pp_vec3_scale(&u, pp_invf(len), &u);
         pp_vec3_sub(o, a, &m);
 
         float mu = pp_vec3_dot(&m, &u);
@@ -1160,7 +1249,7 @@ bool pp_capsule_intersect(const PPVec3 *a, const PPVec3 *b, float radius,
         float C = pp_vec3_dot(&mp, &mp) - radius * radius;
         float disc = B * B - A * C;
         if (A > 1e-8f && disc >= 0.0f) {
-            float t = (-B - sqrtf(disc)) / A;
+            float t = (-B - pp_sqrtf(disc)) / A;
             float along = mu + du * t;
             if (t > 0.0f && t < best && along >= 0.0f && along <= len) {
                 best = t;
@@ -1382,7 +1471,7 @@ bool pp_sphere_intersect(
     // to the sphere centre, so b = oc·d is positive when the sphere is ahead of
     // the origin and the roots are t = b ± sqrt(disc). (Using -b here would only
     // ever return hits for spheres *behind* the ray.)
-    float sqrtDiscriminant = sqrtf(discriminant);
+    float sqrtDiscriminant = pp_sqrtf(discriminant);
     float t1 = b - sqrtDiscriminant;
     float t2 = b + sqrtDiscriminant;
 
@@ -1433,7 +1522,7 @@ bool pp_tri_intersect(
         return false;
     }
 
-    float inv_det = 1.0f / det;
+    float inv_det = pp_invf(det);
 
     // s = o - v0
     float s_x = o->x - tri->v[0].x;
@@ -1697,8 +1786,8 @@ void pp_quat_from_axis_angle(PPQuaternion *q, const PPVec3 *axis, float angle)
     pp_vec3_normalize(&a);
 
     float half = angle * 0.5f;
-    float s = sinf(half); // sin(θ/2)
-    float c = cosf(half); // cos(θ/2)
+    float s = pp_sinf(half); // sin(θ/2)
+    float c = pp_cosf(half); // cos(θ/2)
 
     q->x = a.xyz[0] * s; // axis.x * sin(θ/2)
     q->y = a.xyz[1] * s; // axis.y * sin(θ/2)
@@ -1734,7 +1823,7 @@ void pp_body_look_at(PPBody *s, float x, float y, float z)
         pp_quat_from_axis_angle(&q_err, &axis, M_PI);
     } else {
         PPVec3 axis;
-        float s = sqrtf((1.0f + d) * 2.0f);
+        float s = pp_sqrtf((1.0f + d) * 2.0f);
         axis.xyz[0] = c.xyz[0] / s;
         axis.xyz[1] = c.xyz[1] / s;
         axis.xyz[2] = c.xyz[2] / s;
@@ -2192,7 +2281,7 @@ static inline void pp_fill_collision_info_sphere_sphere(PPBody *lhs_body,
     c->dist = dist - total_radius;
     c->separation = dist - total_radius; // only reported while overlapping
     if (dist > 0) {
-        float inv = 1.0f / dist;
+        float inv = pp_invf(dist);
         c->n.x *= inv; c->n.y *= inv; c->n.z *= inv;
     }
 
@@ -2580,7 +2669,7 @@ static void pp_solve_constraint_fixed_distance_velocities(PPBody* b1, PPBody* b2
     }
 
     PPVec3 n;
-    pp_vec3_scale(&delta, 1.0f / dist, &n);
+    pp_vec3_scale(&delta, pp_invf(dist), &n);
 
     PPVec3 rel_vel;
     pp_vec3_sub(&b2->vel, &b1->vel, &rel_vel);
@@ -2664,7 +2753,7 @@ static void pp_solve_constraint_fixed_distance_positions(PPBody* b1, PPBody* b2,
     }
 
     PPVec3 n;
-    pp_vec3_scale(&delta, 1.0f / current, &n);
+    pp_vec3_scale(&delta, pp_invf(current), &n);
 
     float Cpos = current - target;
 
@@ -2969,7 +3058,7 @@ static float pp_joint_hinge_angle(const PPConstraint* c, const PPVec3 *axis, con
     PPVec3 ref2, s;
     pp_joint_dir_to_world(c->body2, &c->joint.local_ref2, &ref2);
     pp_vec3_cross(ref1, &ref2, &s);
-    return atan2f(pp_vec3_dot(&s, axis), pp_vec3_dot(ref1, &ref2));
+    return pp_atan2f(pp_vec3_dot(&s, axis), pp_vec3_dot(ref1, &ref2));
 }
 
 float pp_constraint_get_hinge_angle(const PPConstraint* c)
@@ -3015,7 +3104,7 @@ static float pp_joint_angular_mass(const PPBody *a, const PPBody *b, const PPVec
     pp_mat3_mult(&a->inv_inertia_world, d, &k1);
     pp_mat3_mult(&b->inv_inertia_world, d, &k2);
     float k = pp_vec3_dot(&k1, d) + pp_vec3_dot(&k2, d);
-    return (k > 1e-9f) ? 1.0f / k : 0.0f;
+    return (k > 1e-9f) ? pp_invf(k) : 0.0f;
 }
 
 /* Angular impulse `amount` about d: minus on body1, plus on body2. */
@@ -3224,11 +3313,11 @@ static void pp_prepare_contact(PPCollision *m, float t)
 
     float k;
     k = pp_contact_effective_mass(lhs, rhs, &m->r1, &m->r2, &m->n, inv_mass_sum);
-    m->mass_n = (k > 1e-8f) ? 1.0f / k : 0.0f;
+    m->mass_n = (k > 1e-8f) ? pp_invf(k) : 0.0f;
     k = pp_contact_effective_mass(lhs, rhs, &m->r1, &m->r2, &m->t1, inv_mass_sum);
-    m->mass_t1 = (k > 1e-8f) ? 1.0f / k : 0.0f;
+    m->mass_t1 = (k > 1e-8f) ? pp_invf(k) : 0.0f;
     k = pp_contact_effective_mass(lhs, rhs, &m->r1, &m->r2, &m->t2, inv_mass_sum);
-    m->mass_t2 = (k > 1e-8f) ? 1.0f / k : 0.0f;
+    m->mass_t2 = (k > 1e-8f) ? pp_invf(k) : 0.0f;
 
     PPVec3 rel_vel;
     pp_contact_rel_vel(lhs, rhs, &m->r1, &m->r2, &rel_vel);
@@ -3328,7 +3417,7 @@ static void pp_solve_contact_friction(PPCollision *m)
         // rather than square.
         float len_sq = new1 * new1 + new2 * new2;
         if (len_sq > max_friction * max_friction) {
-            float scale = max_friction / sqrtf(len_sq);
+            float scale = max_friction / pp_sqrtf(len_sq);
             new1 *= scale;
             new2 *= scale;
         }
@@ -3356,7 +3445,7 @@ static void pp_solve_contact_friction(PPCollision *m)
         pp_vec3_sub(&rhs->a_vel, &lhs->a_vel, &w_rel);
         float w = pp_vec3_length(&w_rel);
         if (w > 1e-6f) {
-            pp_vec3_scale(&w_rel, 1.0f / w, &dir);
+            pp_vec3_scale(&w_rel, pp_invf(w), &dir);
             pp_mat3_mult(&lhs->inv_inertia_world, &dir, &k1);
             pp_mat3_mult(&rhs->inv_inertia_world, &dir, &k2);
             float k = pp_vec3_dot(&dir, &k1) + pp_vec3_dot(&dir, &k2);
@@ -3508,7 +3597,7 @@ bool pp_sphere_box_intersect(
     pp_vec3_add(&contact_world, box_pos, contact_point);
 
     // Penetration depth
-    float dist = sqrtf(dist_sq);
+    float dist = pp_sqrtf(dist_sq);
     if (intersection) {
         *intersection = sphere_radius - dist;
     }
@@ -3516,7 +3605,7 @@ bool pp_sphere_box_intersect(
     if (n) {
         PPVec3 normal_local;
         if (dist > 1e-6f) {
-            float inv_dist = -1.0f / dist;
+            float inv_dist = -pp_invf(dist);
             pp_vec3_set(&normal_local, dx * inv_dist, dy * inv_dist, dz * inv_dist);
         } else {
             // Sphere center is inside box
@@ -3563,12 +3652,17 @@ static void pp_integrate_velocities(float t)
         pp_vec3_scale(&body->a_vel, t, &scaled_vel);
         pp_vec3_add(&body->solve_dtheta, &scaled_vel, &body->solve_dtheta);
 
+        // q += dt/2 * w * q, then renormalise, rather than building the exact
+        // rotation from sin and cos of the half angle. Over a substep the
+        // angle is tiny, so the two agree to a few parts per million -- and
+        // tiny angles are exactly where a fast sin/cos falls down: the SH4's
+        // FSCA works in 1/65536ths of a turn, which at a quarter of a 60 Hz
+        // step silently drops several percent of every body's spin.
         PPQuaternion q_rot;
-        pp_quat_from_angular_velocity(&body->a_vel,
-                                      t,
-                                      &q_rot); // Get rotation quaternion from angular velocity
+        float half_t = 0.5f * t;
+        pp_quat_set(&q_rot, body->a_vel.x * half_t, body->a_vel.y * half_t, body->a_vel.z * half_t, 1.0f);
         pp_quat_multiply(&q_rot, &body->rot, &body->rot); // a_vel is world-space: pre-multiply
-        pp_quat_normalize(&body->rot);                    // Normalize the quaternion
+        pp_quat_normalize(&body->rot);
 
         if (offset_com) {
             PPVec3 r;
@@ -3773,7 +3867,7 @@ static bool pp_sat_box_box(const PPVec3 *posA, const PPQuaternion *rotA, const P
                 continue;
             }
 
-            pp_vec3_scale(&L, 1.0f / len, &L);
+            pp_vec3_scale(&L, pp_invf(len), &L);
             float rA = pp_box_project_radius(heA, ua, &L);
             float rB = pp_box_project_radius(heB, ub, &L);
             float overlap = rA + rB - fabsf(pp_vec3_dot(&dc, &L));
@@ -4076,7 +4170,7 @@ static void pp_capsule_round_candidate(PPCapsuleContact *out, const PPVec3 *ca, 
     if (separation > reach) return;
 
     if (dist > 1e-6f) {
-        pp_vec3_scale(&n, 1.0f / dist, &n);
+        pp_vec3_scale(&n, pp_invf(dist), &n);
     } else {
         pp_vec3_set(&n, 0.0f, 1.0f, 0.0f);
     }
@@ -4155,7 +4249,7 @@ static void pp_sphere_box_local(const PPVec3 *c, float radius, const PPVec3 *he,
         PPVec3 d;
         pp_vec3_sub(&q, c, &d);
         float dist = pp_vec3_length(&d);
-        pp_vec3_scale(&d, 1.0f / dist, normal);
+        pp_vec3_scale(&d, pp_invf(dist), normal);
         *point = q;
         *separation = dist - radius;
         return;
@@ -4674,7 +4768,7 @@ bool pp_physics_ray_cast(const PPVec3 *origin,
     if (len < 1e-12f || max_distance <= 0.0f) {
         return false;
     }
-    pp_vec3_scale(&d, 1.0f / len, &d);
+    pp_vec3_scale(&d, pp_invf(len), &d);
 
     PPRayHit best;
     memset(&best, 0, sizeof(best));
@@ -4751,7 +4845,7 @@ bool pp_physics_ray_cast(const PPVec3 *origin,
 
             float n_len = pp_vec3_length(&normal);
             if (n_len > 1e-9f) {
-                pp_vec3_scale(&normal, 1.0f / n_len, &normal);
+                pp_vec3_scale(&normal, pp_invf(n_len), &normal);
             } else {
                 pp_vec3_neg(&d, &normal);
             }
@@ -5294,7 +5388,7 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                         float radius_sum = lhs_shape->sphere.radius + rhs_shape->sphere.radius;
                         float reach_sum = radius_sum + PP_CONTACT_MARGIN;
                         if (dist <= (reach_sum * reach_sum)) {
-                            dist = sqrtf(dist);
+                            dist = pp_sqrtf(dist);
                             PPCollision c;
                             pp_fill_collision_info_sphere_sphere(lhs_body, lhs_shape, &lhs_spos,
                                                                  rhs_body, rhs_shape, &rhs_spos, dist, &c);
