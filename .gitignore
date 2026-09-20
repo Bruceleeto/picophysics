@@ -5,3 +5,4 @@ examples/**/tools*
 examples/**/package*
 test_physics
 *.user
+docs/

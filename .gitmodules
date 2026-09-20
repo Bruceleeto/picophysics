@@ -1,0 +1,4 @@
+[submodule "extern/sh4zam"]
+	path = extern/sh4zam
+	url = git@github.com:gyrovorbis/sh4zam.git
+	branch = master
