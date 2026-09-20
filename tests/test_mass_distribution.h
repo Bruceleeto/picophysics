@@ -64,22 +64,66 @@ public:
         assert_close(1.0f / 8.0f, b->inv_mass, 1e-6f);
     }
 
-    // A shape offset from the body origin adds m*d^2 to the inertia about the
-    // axes perpendicular to the offset (parallel-axis theorem), and nothing to
-    // the axis parallel to it.
+    // Inertia is taken about the body's centre of mass, not its origin. A lone
+    // shape offset from the origin IS the centre of mass, so the offset adds
+    // nothing; the parallel-axis term only appears between shapes (next test).
     void test_offset_shape_parallel_axis() {
         PPVec3 p = {.xyz = {0.0f, 0.0f, 0.0f}};
         PPBody* b = pp_physics_create_body(&p);
         // sphere mass 1, radius 1 (local I = 0.4), offset 2 along +X.
         pp_body_add_sphere(b, 1.0f, 1.0f, 0, 2.0f, 0.0f, 0.0f);
 
-        // Offset is along X: Ixx unchanged, Iyy and Izz gain m*d^2 = 1*4 = 4.
+        assert_close(2.0f, b->com_local.x, 1e-5f);
         assert_close(0.4f, b->inertia.m[0], 1e-4f);
-        assert_close(4.4f, b->inertia.m[4], 1e-4f);
-        assert_close(4.4f, b->inertia.m[8], 1e-4f);
-        // dy = dz = 0 so products of inertia stay zero.
+        assert_close(0.4f, b->inertia.m[4], 1e-4f);
+        assert_close(0.4f, b->inertia.m[8], 1e-4f);
         assert_close(0.0f, b->inertia.m[1], 1e-6f);
         assert_close(0.0f, b->inertia.m[2], 1e-6f);
+    }
+
+    // Unequal shapes: the centre of mass sits between them, weighted by mass,
+    // and each contributes m*d^2 measured from there.
+    void test_lopsided_body_inertia_about_centre_of_mass() {
+        PPVec3 p = {.xyz = {0.0f, 0.0f, 0.0f}};
+        PPBody* b = pp_physics_create_body(&p);
+        pp_body_add_sphere(b, 1.0f, 1.0f, 0, 0.0f, 0.0f, 0.0f);
+        pp_body_add_sphere(b, 1.0f, 3.0f, 0, 2.0f, 0.0f, 0.0f);
+
+        // COM at (0*1 + 2*3) / 4 = 1.5.
+        assert_close(1.5f, b->com_local.x, 1e-5f);
+        // Ixx: 0.4*1 + 0.4*3. Iyy/Izz add 1*1.5^2 + 3*0.5^2 = 3.
+        assert_close(1.6f, b->inertia.m[0], 1e-4f);
+        assert_close(4.6f, b->inertia.m[4], 1e-4f);
+        assert_close(4.6f, b->inertia.m[8], 1e-4f);
+    }
+
+    // A lopsided body spinning freely must turn about its centre of mass: with
+    // no forces acting, that point cannot move.
+    void test_lopsided_body_spins_about_centre_of_mass() {
+        PPVec3 zero = {.xyz = {0.0f, 0.0f, 0.0f}};
+        pp_physics_set_gravity(&zero);
+
+        PPVec3 p = {.xyz = {0.0f, 5.0f, 0.0f}};
+        PPBody* b = pp_physics_create_body(&p);
+        pp_body_add_sphere(b, 0.5f, 1.0f, 0, 0.0f, 0.0f, 0.0f);
+        pp_body_add_sphere(b, 0.5f, 3.0f, 0, 2.0f, 0.0f, 0.0f);
+        pp_body_set_damping(b, 0.0f);
+        pp_body_set_angular_damping(b, 0.0f);
+        pp_body_set_angular_velocity(b, 0.0f, 0.0f, 2.0f);
+
+        for (int i = 0; i < 600; ++i) {
+            pp_physics_step(1.0f / 60.0f, 8, 4);
+
+            // Centre of mass = origin + rot * (1.5, 0, 0): the rotated X axis.
+            PPQuaternion q;
+            PPVec3 o;
+            pp_body_get_rotation(b, &q);
+            pp_body_get_position(b, &o);
+            float com_x = o.x + 1.5f * (1.0f - 2.0f * (q.y * q.y + q.z * q.z));
+            float com_y = o.y + 1.5f * (2.0f * (q.x * q.y + q.w * q.z));
+            assert_close(1.5f, com_x, 1e-3f);
+            assert_close(5.0f, com_y, 1e-3f);
+        }
     }
 
     // Two equal shapes placed symmetrically about the origin: products of

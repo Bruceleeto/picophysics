@@ -223,6 +223,29 @@ typedef struct _PPCollision
     // an approaching body so it closes the gap without overshooting (passing
     // through), which is what prevents fast movers from tunnelling.
     float separation;
+
+    /* ---- solver state, filled in by the step; not meaningful in callbacks ---
+     *
+     * t1/t2 are a fixed tangent basis. Friction has to accumulate along axes
+     * that do not move during the solve, otherwise its direction chases the
+     * instantaneous tangent velocity and pumps energy into a resting body.
+     *
+     * jn/jt1/jt2 are accumulated impulses. The solver clamps the accumulated
+     * value, not each increment, and applies only the change; clamping the
+     * increment lets it push bodies apart but never take an over-push back. */
+    PPVec3 t1, t2;
+    float jn;       /* accumulated normal impulse, >= 0 */
+    float jt1, jt2; /* accumulated friction impulse along t1/t2 */
+    float max_jn;   /* largest jn seen this step: did the contact ever push? */
+    bool impact;    /* arrived with real approach speed, i.e. not a resting contact */
+
+    PPVec3 r1, r2;                   /* contact point relative to each body, at step start */
+    float mass_n, mass_t1, mass_t2;  /* effective masses along n, t1, t2 */
+
+    /* Restitution target, captured once per step from the approach velocity
+     * before any solving. It cannot be re-derived later: once the contact has
+     * been solved it is no longer approaching. */
+    float v_bias;
 } PPCollision;
 
 typedef enum _PPAxisLock {
@@ -279,6 +302,12 @@ typedef struct _PPBody
     PPMat3 inertia;
     PPMat3 inv_inertia;
 
+    /* inv_inertia rotated into world space (R * I^-1 * R^T). The solver works
+     * with world-space torques and angular velocities, so this is what it
+     * must use; refreshed at the start of every step. */
+    PPMat3 inv_inertia_world;
+    PPVec3 com_local; /* centre of mass in the body's frame; zero unless shapes are lopsided */
+
     BodyKind kind;
 
     PPAxisLock lock;
@@ -295,6 +324,13 @@ typedef struct _PPBody
 
     PPShape shapes[PP_MAX_SHAPES_PER_BODY];
     int shape_count;
+
+    /* How far the body has moved and turned since the start of the current
+     * step. Contacts use these to keep their separation up to date across
+     * substeps without re-running collision detection. */
+    PPVec3 solve_dpos;
+    PPVec3 solve_dtheta;
+
 } PPBody;
 
 typedef struct _PPTriangle
@@ -373,6 +409,39 @@ PPTriangle *pp_physics_create_triangle(const PPVec3 *v1,
                                        BodyKind kind);
 size_t pp_physics_triangle_count();
 const PPTriangle *pp_physics_triangle_at(size_t i);
+
+/* Fill `tri` from three corners without adding it to the global `tris[]`
+ * array. Used by hosts that keep their own static world (a BVH, a grid) and
+ * feed picophysics only the triangles near each shape via a PPTriangleQuery. */
+void pp_triangle_init(PPTriangle *tri,
+                      const PPVec3 *v1,
+                      const PPVec3 *v2,
+                      const PPVec3 *v3,
+                      BodyKind kind);
+
+/* Host-supplied broadphase over the static world.
+ *
+ * Called once per shape per step. The host writes up to `max` triangles whose
+ * bounds touch the sphere (`centre`, `reach`) into `out` and returns how many
+ * it wrote. Returning more than `max` is not allowed; the host should stop at
+ * `max` and let picophysics count the overflow.
+ *
+ * While a query is set, the global `tris[]` array is not consulted at all. */
+typedef int (*PPTriangleQuery)(const PPVec3 *centre,
+                               float reach,
+                               PPTriangle *out,
+                               int max,
+                               void *user);
+
+/* Pass fn = NULL to go back to iterating the global `tris[]` array. */
+void pp_physics_set_triangle_query(PPTriangleQuery fn, void *user);
+
+/* Number of queries in the last step that returned exactly `max` triangles,
+ * i.e. that may have been truncated. Reset at the top of each step. */
+int pp_physics_query_overflow_count();
+
+/* Most triangles returned by a single query in the last step. */
+int pp_physics_query_max_candidates();
 
 PPBody *pp_physics_create_sphere(float radius, const PPVec3 *pos, float mass, BodyKind kind);
 
@@ -466,6 +535,13 @@ void pp_body_limit_angular_velocity(PPBody *body, float speed);
 #define PICOPHYSICS_MAX_MANIFOLDS 256
 #endif
 
+/* Size of the per-shape candidate buffer filled by a PPTriangleQuery. This
+ * buffer is a local in pp_physics_step, so it costs
+ * PICOPHYSICS_MAX_QUERY_TRIANGLES * sizeof(PPTriangle) bytes of stack. */
+#ifndef PICOPHYSICS_MAX_QUERY_TRIANGLES
+#define PICOPHYSICS_MAX_QUERY_TRIANGLES 128
+#endif
+
 static PPBody objects[PICOPHYSICS_MAX_OBJECTS];
 static int object_count = 0;
 static int dead_object_count = 0;
@@ -484,6 +560,30 @@ static PPBody trimesh_body = {
 
 static PPTriangle tris[PICOPHYSICS_MAX_TRIANGLES];
 static int tri_count = 0;
+
+/* Last step's solved contacts, kept so this step's solver can start from the
+ * impulses that were holding everything up a moment ago (warm starting)
+ * instead of rediscovering them from zero. Without it a stack N boxes deep
+ * needs on the order of N iterations just to carry the load to the ground. */
+typedef struct _PPContactCache {
+    PPBody *obj1;
+    PPBody *obj2;
+    PPVec3 r1;   /* contact point relative to obj1->pos, world axes */
+    PPVec3 n;
+    float jn, jt1, jt2;
+    bool used;
+} PPContactCache;
+
+static PPContactCache contact_cache[PICOPHYSICS_MAX_MANIFOLDS];
+static int contact_cache_count = 0;
+
+static PPTriangleQuery tri_query = NULL;
+static void *tri_query_user = NULL;
+static int tri_query_overflows = 0;
+static int tri_query_max_candidates = 0;
+
+
+
 
 static struct _PPCollisionMapEntry
 {
@@ -1192,6 +1292,7 @@ void pp_body_set_damping(PPBody *s, float d)
 }
 
 static void pp_body_recompute_mass_inertia(PPBody *body);
+static inline void pp_body_world_com(const PPBody *body, PPVec3 *out);
 
 void pp_body_set_mass(PPBody* b, float mass) {
     // Scale all shape masses proportionally
@@ -1388,10 +1489,74 @@ static void pp_body_init(PPBody *body, const PPVec3 *pos, float mass, BodyKind k
     pp_body_set_bounce(body, 0.5f);
 }
 
+/* inv_inertia_world = R * inv_inertia * R^T, with R the body's rotation. */
+static void pp_body_update_world_inertia(PPBody *body)
+{
+    static const PPVec3 basis[3] = {
+        {.xyz = {1.0f, 0.0f, 0.0f}},
+        {.xyz = {0.0f, 1.0f, 0.0f}},
+        {.xyz = {0.0f, 0.0f, 1.0f}},
+    };
+
+    PPVec3 axes[3];
+    for (int i = 0; i < 3; ++i) {
+        pp_quat_transform(&body->rot, &basis[i], &axes[i]);
+    }
+
+    // tmp column j = R * (column j of inv_inertia)
+    PPVec3 tmp[3];
+    for (int j = 0; j < 3; ++j) {
+        const float *c = &body->inv_inertia.m[j * 3];
+        for (int k = 0; k < 3; ++k) {
+            tmp[j].xyz[k] = axes[0].xyz[k] * c[0] + axes[1].xyz[k] * c[1] + axes[2].xyz[k] * c[2];
+        }
+    }
+
+    // out = tmp * R^T: out[r][c] = sum_j tmp[j][r] * axes[j][c]
+    for (int c = 0; c < 3; ++c) {
+        for (int r = 0; r < 3; ++r) {
+            body->inv_inertia_world.m[c * 3 + r] = tmp[0].xyz[r] * axes[0].xyz[c] +
+                                                   tmp[1].xyz[r] * axes[1].xyz[c] +
+                                                   tmp[2].xyz[r] * axes[2].xyz[c];
+        }
+    }
+
+    // A locked axis behaves as infinite inertia about that world axis, so
+    // contact impulses cannot spin the body around it (rather than spinning
+    // it for a step and having the velocity zeroed afterwards).
+    if (body->lock) {
+        const PPAxisLock locks[3] = {PP_AXIS_LOCK_PITCH, PP_AXIS_LOCK_YAW, PP_AXIS_LOCK_ROLL};
+        for (int a = 0; a < 3; ++a) {
+            if ((body->lock & locks[a]) != locks[a]) continue;
+            for (int k = 0; k < 3; ++k) {
+                body->inv_inertia_world.m[a * 3 + k] = 0.0f;
+                body->inv_inertia_world.m[k * 3 + a] = 0.0f;
+            }
+        }
+    }
+}
+
 static void pp_body_recompute_mass_inertia(PPBody *body)
 {
     float total_mass = 0.0f;
     memset(body->inertia.m, 0, sizeof(body->inertia.m));
+
+    // Centre of mass first: the inertia below is taken about it, which is what
+    // lets linear and angular motion be integrated independently.
+    PPVec3 com = {.xyz = {0.0f, 0.0f, 0.0f}};
+    for (int i = 0; i < body->shape_count; ++i) {
+        const PPShape *s = &body->shapes[i];
+        if (s->mass <= 0.0f) continue;
+        com.x += s->mass * s->offset.x;
+        com.y += s->mass * s->offset.y;
+        com.z += s->mass * s->offset.z;
+        total_mass += s->mass;
+    }
+    if (total_mass > 0.0f) {
+        pp_vec3_scale(&com, 1.0f / total_mass, &com);
+    }
+    body->com_local = com;
+    total_mass = 0.0f;
 
     for (int i = 0; i < body->shape_count; ++i) {
         const PPShape *s = &body->shapes[i];
@@ -1416,7 +1581,7 @@ static void pp_body_recompute_mass_inertia(PPBody *body)
         }
 
         // Parallel axis theorem: I_total += I_local + m * (d·d * I3 - outer(d,d))
-        float dx = s->offset.x, dy = s->offset.y, dz = s->offset.z;
+        float dx = s->offset.x - com.x, dy = s->offset.y - com.y, dz = s->offset.z - com.z;
         float d_dot_d = dx*dx + dy*dy + dz*dz;
 
         body->inertia.m[0] += Ixx + m * (d_dot_d - dx*dx);
@@ -1439,6 +1604,8 @@ static void pp_body_recompute_mass_inertia(PPBody *body)
         memset(body->inertia.m, 0, sizeof(body->inertia.m));
         memset(body->inv_inertia.m, 0, sizeof(body->inv_inertia.m));
     }
+
+    pp_body_update_world_inertia(body);
 }
 
 PPShape *pp_body_add_sphere(PPBody *body, float radius, float mass, BodyKind kind, float offset_x, float offset_y, float offset_z)
@@ -1469,7 +1636,7 @@ PPShape *pp_body_add_box(PPBody *body, float w, float h, float d, float mass, Bo
     s->type = PP_OBJECT_TYPE_BOX;
     pp_vec3_set(&s->box.whd, w, h, d);
     pp_vec3_set(&s->box.half_extents, w * 0.5f, h * 0.5f, d * 0.5f);
-    s->box.bounding_radius = pp_vec3_length(&s->box.whd);
+    s->box.bounding_radius = pp_vec3_length(&s->box.half_extents);
     s->mass = mass;
     s->kind = kind;
     pp_vec3_set(&s->offset, offset_x, offset_y, offset_z);
@@ -1576,15 +1743,15 @@ void pp_body_add_angular_force(PPBody *s, float tx, float ty, float tz)
     PPVec3 torque;
     pp_vec3_set(&torque, tx, ty, tz);
 
-    // FIXME: Implement for boxes!
-    // Simplified inertia for Spheres
-    float I = s->inertia.m[0];
+    if (s->mass <= 0.0f)
+        return; // nothing to do for mass‑less objects
 
-    if (I <= 0.0f)
-        return; // nothing to do for mass‑less or zero‑radius objects
+    // The torque is world-space; the rotation may have been changed by the
+    // caller since the last step, so refresh the world tensor first.
+    pp_body_update_world_inertia(s);
 
     PPVec3 ang_acc;
-    pp_vec3_scale(&torque, 1.0f / I, &ang_acc);
+    pp_mat3_mult(&s->inv_inertia_world, &torque, &ang_acc);
     pp_vec3_add(&s->a_acc, &ang_acc, &s->a_acc);
 }
 
@@ -1595,8 +1762,9 @@ void pp_body_add_force_at_position(PPBody *b, const PPVec3 *world_pos, const PPV
 
     // Calculate torque from offset position
     // torque = (position - center_of_mass) × force
-    PPVec3 rel_pos;
-    pp_vec3_sub(world_pos, &b->pos, &rel_pos);
+    PPVec3 rel_pos, com;
+    pp_body_world_com(b, &com);
+    pp_vec3_sub(world_pos, &com, &rel_pos);
 
     PPVec3 torque;
     pp_vec3_cross(&rel_pos, force, &torque);
@@ -1790,12 +1958,12 @@ PPBody *pp_physics_create_box(
     return body;
 }
 
-PPTriangle *pp_physics_create_triangle(const PPVec3 *v1,
-                                       const PPVec3 *v2,
-                                       const PPVec3 *v3,
-                                       BodyKind kind)
+void pp_triangle_init(PPTriangle *tri,
+                      const PPVec3 *v1,
+                      const PPVec3 *v2,
+                      const PPVec3 *v3,
+                      BodyKind kind)
 {
-    PPTriangle *tri = &tris[tri_count++];
     pp_vec3_assign(&tri->v[0], v1);
     pp_vec3_assign(&tri->v[1], v2);
     pp_vec3_assign(&tri->v[2], v3);
@@ -1818,8 +1986,32 @@ PPTriangle *pp_physics_create_triangle(const PPVec3 *v1,
     tri->aabb_max_x = fmaxf(v1->x, fmaxf(v2->x, v3->x));
     tri->aabb_max_y = fmaxf(v1->y, fmaxf(v2->y, v3->y));
     tri->aabb_max_z = fmaxf(v1->z, fmaxf(v2->z, v3->z));
+}
 
+PPTriangle *pp_physics_create_triangle(const PPVec3 *v1,
+                                       const PPVec3 *v2,
+                                       const PPVec3 *v3,
+                                       BodyKind kind)
+{
+    PPTriangle *tri = &tris[tri_count++];
+    pp_triangle_init(tri, v1, v2, v3, kind);
     return tri;
+}
+
+void pp_physics_set_triangle_query(PPTriangleQuery fn, void *user)
+{
+    tri_query = fn;
+    tri_query_user = user;
+}
+
+int pp_physics_query_overflow_count()
+{
+    return tri_query_overflows;
+}
+
+int pp_physics_query_max_candidates()
+{
+    return tri_query_max_candidates;
 }
 
 void pp_physics_clear()
@@ -1829,6 +2021,7 @@ void pp_physics_clear()
     dead_object_count = 0;
     constraint_count = 0;
     dead_constraint_count = 0;
+    contact_cache_count = 0;
     memset(tris, 0, sizeof(tris));
     memset(objects, 0, sizeof(objects));
     memset(constraints, 0, sizeof(constraints));
@@ -1874,6 +2067,13 @@ void pp_physics_destroy_body(PPBody *b)
         }
     }
 
+    // The slot may be handed to a new body; don't let it inherit impulses.
+    for (int i = 0; i < contact_cache_count; ++i) {
+        if (contact_cache[i].obj1 == b || contact_cache[i].obj2 == b) {
+            contact_cache[i].used = true;
+        }
+    }
+
     b->is_alive = false;
     ++dead_object_count;
 }
@@ -1884,7 +2084,12 @@ void pp_physics_set_gravity(const PPVec3 *v)
     gravity_magnitude = pp_vec3_length(&gravity);
 }
 
-static void pp_integrate_forces(float t)
+/* Called once per substep with the substep length `t`. `step_t` is the length
+ * of the whole step and `last` marks the final substep: damping is applied
+ * once per step (so it decays exactly as documented whatever the substep
+ * count), and accumulated forces are held across the substeps and cleared at
+ * the end. */
+static void pp_integrate_forces(float t, float step_t, bool last)
 {
     PPVec3 scaled_vel;
     // Apply acceleration to velocity
@@ -1903,11 +2108,13 @@ static void pp_integrate_forces(float t)
 
         pp_vec3_scale(&total_acc, t, &scaled_vel);
         pp_vec3_add(&body->vel, &scaled_vel, &body->vel);
-        pp_vec3_init(&body->acc);
+        if (last) pp_vec3_init(&body->acc);
 
         // Apply linear damping (linear approximation of exp(-x) ≈ 1-x for small x)
-        float damp = 1.0f - body->damping * t;
-        pp_vec3_scale(&body->vel, damp, &body->vel);
+        if (last) {
+            float damp = 1.0f - body->damping * step_t;
+            pp_vec3_scale(&body->vel, damp, &body->vel);
+        }
 
         if (body->lock) {
             if ((body->lock & PP_AXIS_LOCK_PITCH) == PP_AXIS_LOCK_PITCH) {
@@ -1931,11 +2138,13 @@ static void pp_integrate_forces(float t)
         pp_vec3_add(&body->a_vel, &scaled_ang_vel, &body->a_vel);
 
         // Apply angular damping (linear approximation of exp(-x) ≈ 1-x for small x)
-        float a_damp = 1.0f - body->a_damping * t;
-        pp_vec3_scale(&body->a_vel, a_damp, &body->a_vel);
+        if (last) {
+            float a_damp = 1.0f - body->a_damping * step_t;
+            pp_vec3_scale(&body->a_vel, a_damp, &body->a_vel);
+        }
 
         // Reset the acceleration
-        pp_vec3_init(&body->a_acc);
+        if (last) pp_vec3_init(&body->a_acc);
 
         float vl_sq = body->vel_limit * body->vel_limit;
         float avl_sq = body->a_vel_limit * body->a_vel_limit;
@@ -2094,228 +2303,335 @@ static void pp_solve_constraint_positions(PPConstraint *entry, float dt)
     }
 }
 
-static void pp_solve_velocities(const PPCollision *manifold, float t)
+/* Build an orthonormal tangent basis around n. Called once per manifold per
+ * step so friction accumulates along axes that do not move between the
+ * velocity iterations. */
+static void pp_contact_tangents(const PPVec3 *n, PPVec3 *t1, PPVec3 *t2)
 {
-    PPBody *lhs = manifold->obj1;
-    PPBody *rhs = manifold->obj2;
-
-    if (!lhs->is_alive || !rhs->is_alive) {
-        return;
+    if (fabsf(n->x) >= 0.57735f) {
+        t1->x =  n->y; t1->y = -n->x; t1->z = 0.0f;
+    } else {
+        t1->x = 0.0f;  t1->y =  n->z; t1->z = -n->y;
     }
+    pp_vec3_normalize(t1);
+    pp_vec3_cross(n, t1, t2);
+}
 
-    float inv_mass_sum = lhs->inv_mass + rhs->inv_mass;
+/* Effective mass along `dir` for the contact at manifold->p. */
+static float pp_contact_effective_mass(const PPBody *lhs, const PPBody *rhs,
+                                       const PPVec3 *lhs_pcp, const PPVec3 *rhs_pcp,
+                                       const PPVec3 *dir, float inv_mass_sum)
+{
+    PPVec3 lhs_rxd, rhs_rxd, i_lhs, i_rhs, lhs_term, rhs_term;
 
-    if (inv_mass_sum < 1e-8f) {
-        // Both bodies are static
-        return;
-    }
+    pp_vec3_cross(lhs_pcp, dir, &lhs_rxd);
+    pp_vec3_cross(rhs_pcp, dir, &rhs_rxd);
+    pp_mat3_mult(&lhs->inv_inertia_world, &lhs_rxd, &i_lhs);
+    pp_mat3_mult(&rhs->inv_inertia_world, &rhs_rxd, &i_rhs);
+    pp_vec3_cross(&i_lhs, lhs_pcp, &lhs_term);
+    pp_vec3_cross(&i_rhs, rhs_pcp, &rhs_term);
 
-    const PPVec3 *n = &manifold->n;
+    return inv_mass_sum + pp_vec3_dot(&lhs_term, dir) + pp_vec3_dot(&rhs_term, dir);
+}
 
-    PPVec3 lhs_pcp = {.xyz = {0.0f, 0.0f, 0.0f}}, rhs_pcp = {.xyz = {0.0f, 0.0f, 0.0f}};
+/* Apply impulse P at the contact: -P on lhs, +P on rhs, linear and angular. */
+static void pp_apply_impulse(PPBody *lhs, PPBody *rhs,
+                             const PPVec3 *lhs_pcp, const PPVec3 *rhs_pcp,
+                             const PPVec3 *P)
+{
+    PPVec3 tmp, ang;
 
-    // Position (CoM) to contact point (r_a/r_b). Don't set this
-    // if the inv_mass is zero and then it has no effect later on
-    pp_vec3_sub(&manifold->p, &lhs->pos, &lhs_pcp);
-    pp_vec3_sub(&manifold->p, &rhs->pos, &rhs_pcp);
+    pp_vec3_scale(P, lhs->inv_mass, &tmp);
+    pp_vec3_sub(&lhs->vel, &tmp, &lhs->vel);
 
-    // Velocities at contact point
-    PPVec3 lhs_vel, rhs_vel, rel_vel;
-    pp_vec3_cross(&lhs->a_vel, &lhs_pcp, &lhs_vel);
-    pp_vec3_cross(&rhs->a_vel, &rhs_pcp, &rhs_vel);
+    pp_vec3_scale(P, rhs->inv_mass, &tmp);
+    pp_vec3_add(&rhs->vel, &tmp, &rhs->vel);
+
+    pp_vec3_cross(lhs_pcp, P, &ang);
+    pp_mat3_mult(&lhs->inv_inertia_world, &ang, &ang);
+    pp_vec3_sub(&lhs->a_vel, &ang, &lhs->a_vel);
+
+    pp_vec3_cross(rhs_pcp, P, &ang);
+    pp_mat3_mult(&rhs->inv_inertia_world, &ang, &ang);
+    pp_vec3_add(&rhs->a_vel, &ang, &rhs->a_vel);
+}
+
+/* Relative velocity of the contact point, rhs minus lhs. */
+static void pp_contact_rel_vel(const PPBody *lhs, const PPBody *rhs,
+                               const PPVec3 *lhs_pcp, const PPVec3 *rhs_pcp,
+                               PPVec3 *out)
+{
+    PPVec3 lhs_vel, rhs_vel;
+
+    pp_vec3_cross(&lhs->a_vel, lhs_pcp, &lhs_vel);
     pp_vec3_add(&lhs_vel, &lhs->vel, &lhs_vel);
+
+    pp_vec3_cross(&rhs->a_vel, rhs_pcp, &rhs_vel);
     pp_vec3_add(&rhs_vel, &rhs->vel, &rhs_vel);
 
-    if (lhs->inv_mass == 0.0f) {
-        pp_vec3_init(&lhs_vel);
-    }
+    if (lhs->inv_mass == 0.0f) pp_vec3_init(&lhs_vel);
+    if (rhs->inv_mass == 0.0f) pp_vec3_init(&rhs_vel);
 
-    if (rhs->inv_mass == 0.0f) {
-        pp_vec3_init(&rhs_vel);
-    }
+    pp_vec3_sub(&rhs_vel, &lhs_vel, out);
+}
 
-    // Relative velocity at contact point
-    pp_vec3_sub(&rhs_vel, &lhs_vel, &rel_vel); // v_rhs – v_lhs
+/* Soft constraint coefficients (Catto, "Solver2D" / Box2D v3). A contact is
+ * treated as a stiff damped spring rather than a rigid stop: overlap is pushed
+ * out at a controlled rate, and the push never overshoots. */
+typedef struct _PPSoftness {
+    float bias_rate;
+    float mass_scale;
+    float impulse_scale;
+} PPSoftness;
 
-    float vel_along_normal;
-    vel_along_normal = pp_vec3_dot(&rel_vel, n);
+static PPSoftness pp_make_soft(float hertz, float zeta, float h)
+{
+    PPSoftness s;
+    float omega = 2.0f * 3.14159265f * hertz;
+    float a1 = 2.0f * zeta + h * omega;
+    float a2 = h * omega * a1;
+    float a3 = 1.0f / (1.0f + a2);
+    s.bias_rate = omega / a1;
+    s.mass_scale = a2 * a3;
+    s.impulse_scale = a3;
+    return s;
+}
 
-    // Speculative contact bias. When there is still a gap (separation > 0) the
-    // bodies are not touching yet, but were predicted to make contact this
-    // step. Rather than zeroing the approach velocity (which would freeze the
-    // body short of the surface), we permit it to approach just fast enough to
-    // close the gap in exactly one step: allowed = separation / t. The solver
-    // then only removes the velocity *in excess* of that, so a fast mover is
-    // braked to land on the surface instead of passing through it.
-    float allowed = (manifold->separation > 0.0f) ? (manifold->separation / t) : 0.0f;
-
-    // Moving towards each other
-    float r = fmaxf(manifold->obj1_bounce, manifold->obj2_bounce);
-
-    const float bounce_threshold = 0.1f;
-    if (fabsf(vel_along_normal) < bounce_threshold) {
-        // If we're not moving, then don't add bounce!
-        r = 0.0f;
-    }
-
-    if (manifold->separation > 0.0f) {
-        // Don't bounce off a gap; restitution only applies on real contact.
-        r = 0.0f;
-    }
-
-    // Target: vel_along_normal should end at >= -allowed. The required impulse
-    // (numerator) is positive only when the body approaches faster than the
-    // gap permits; the clamp below discards the negative (separating) case,
-    // which is why no explicit "moving apart" early-out is needed here.
-    float numerator = -(1.0f + r) * vel_along_normal - allowed;
-    float linear_term = inv_mass_sum;
-
-    // rhs_pcp might be zero here, but that's fine as it'll cause
-    // zero contribution to the angular velocity
-    PPVec3 lhs_pcp_cross_n, rhs_pcp_cross_n;
-    pp_vec3_cross(&lhs_pcp, &manifold->n, &lhs_pcp_cross_n);
-    pp_vec3_cross(&rhs_pcp, &manifold->n, &rhs_pcp_cross_n);
-
-    PPVec3 i_lhs_pcp_cross_n, i_rhs_pcp_cross_n;
-    pp_mat3_mult(&lhs->inv_inertia, &lhs_pcp_cross_n, &i_lhs_pcp_cross_n);
-    pp_mat3_mult(&rhs->inv_inertia, &rhs_pcp_cross_n, &i_rhs_pcp_cross_n);
-
-    PPVec3 lhs_angular_term, rhs_angular_term;
-    pp_vec3_cross(&i_lhs_pcp_cross_n, &lhs_pcp, &lhs_angular_term);
-    pp_vec3_cross(&i_rhs_pcp_cross_n, &rhs_pcp, &rhs_angular_term);
-
-    float angular_term = pp_vec3_dot(&lhs_angular_term, n) + pp_vec3_dot(&rhs_angular_term, n);
-    float denominator = linear_term + angular_term;
-
-    if (fabsf(denominator) < 1e-8f) {
-        // Prevent divide by zero
+/* World-space centre of mass. Contact lever arms and torques are measured from
+ * here, not from the body origin. */
+static inline void pp_body_world_com(const PPBody *body, PPVec3 *out)
+{
+    if (body->com_local.x == 0.0f && body->com_local.y == 0.0f && body->com_local.z == 0.0f) {
+        *out = body->pos;
         return;
     }
 
-    float J = numerator / denominator;
-    if (J < 0.0f) {
-        J = 0.0f;
-    }
+    PPVec3 r;
+    pp_quat_transform(&body->rot, &body->com_local, &r);
+    pp_vec3_add(&body->pos, &r, out);
+}
 
-    PPVec3 impulse, ang_imp;
-    pp_vec3_scale(n, J, &impulse);
+/* Once per step, before any solving: fix a tangent basis, the lever arms and
+ * effective masses, zero the accumulators, and capture the restitution target
+ * from the approach velocity. */
+static void pp_prepare_contact(PPCollision *m, float t)
+{
+    pp_contact_tangents(&m->n, &m->t1, &m->t2);
+    m->jn = 0.0f;
+    m->jt1 = 0.0f;
+    m->jt2 = 0.0f;
+    m->max_jn = 0.0f;
+    m->impact = false;
+    m->v_bias = 0.0f;
+    m->mass_n = m->mass_t1 = m->mass_t2 = 0.0f;
 
-    PPVec3 i_tmp;
-    // Add linear impulse to the left
-    pp_vec3_scale(&impulse, lhs->inv_mass, &i_tmp);
-    pp_vec3_sub(&lhs->vel, &i_tmp, &lhs->vel); // v_lhs ← v_lhs + Δv
+    PPBody *lhs = m->obj1, *rhs = m->obj2;
+    PPVec3 com1, com2;
+    pp_body_world_com(lhs, &com1);
+    pp_body_world_com(rhs, &com2);
+    pp_vec3_sub(&m->p, &com1, &m->r1);
+    pp_vec3_sub(&m->p, &com2, &m->r2);
 
-    // then add it to the right
-    pp_vec3_scale(&impulse, rhs->inv_mass, &i_tmp);
-    pp_vec3_add(&rhs->vel, &i_tmp, &rhs->vel);
+    if (!lhs->is_alive || !rhs->is_alive) return;
 
-    // Calculate and apply the angular impulse to the left. The sign must match
-    // the linear impulse above: the impulse on lhs is -P (it subtracts P/m from
-    // the linear velocity), so the angular change is -I^-1 (r_a x P). Using +
-    // here made the normal impulse inconsistent with both the linear term and
-    // the friction block below, injecting energy on any off-centre (lever-arm)
-    // contact -- e.g. an offset sphere shape would spin up and fly off.
-    pp_vec3_cross(&lhs_pcp, &impulse, &ang_imp);
-    pp_mat3_mult(&lhs->inv_inertia, &ang_imp, &ang_imp);
-    pp_vec3_sub(&lhs->a_vel, &ang_imp, &lhs->a_vel);
+    float inv_mass_sum = lhs->inv_mass + rhs->inv_mass;
+    if (inv_mass_sum < 1e-8f) return;
 
-    // Same with the right (impulse on rhs is +P).
-    pp_vec3_cross(&rhs_pcp, &impulse, &ang_imp);
-    pp_mat3_mult(&rhs->inv_inertia, &ang_imp, &ang_imp);
-    pp_vec3_add(&rhs->a_vel, &ang_imp, &rhs->a_vel);
+    float k;
+    k = pp_contact_effective_mass(lhs, rhs, &m->r1, &m->r2, &m->n, inv_mass_sum);
+    m->mass_n = (k > 1e-8f) ? 1.0f / k : 0.0f;
+    k = pp_contact_effective_mass(lhs, rhs, &m->r1, &m->r2, &m->t1, inv_mass_sum);
+    m->mass_t1 = (k > 1e-8f) ? 1.0f / k : 0.0f;
+    k = pp_contact_effective_mass(lhs, rhs, &m->r1, &m->r2, &m->t2, inv_mass_sum);
+    m->mass_t2 = (k > 1e-8f) ? 1.0f / k : 0.0f;
 
-    // Friction!!!
-    float f = manifold->obj1_friction * manifold->obj2_friction;
-    PPVec3 lhs_fv, rhs_fv;
+    PPVec3 rel_vel;
+    pp_contact_rel_vel(lhs, rhs, &m->r1, &m->r2, &rel_vel);
+    float vn = pp_vec3_dot(&rel_vel, &m->n);
 
-    // Calculate velocities at the contact point
-    pp_vec3_cross(&lhs->a_vel, &lhs_pcp, &lhs_fv);
-    pp_vec3_add(&lhs_fv, &lhs->vel, &lhs_fv);
-
-    pp_vec3_cross(&rhs->a_vel, &rhs_pcp, &rhs_fv);
-    pp_vec3_add(&rhs_fv, &rhs->vel, &rhs_fv);
-
-    // Get the relative velocity at the contact point
-    // between the two objects
-    PPVec3 fvr;
-    pp_vec3_sub(&rhs_fv, &lhs_fv, &fvr);
-
-    // Remove normal component to get tangent velocity
-    float rv_dot_n = pp_vec3_dot(&fvr, n);
-
-    PPVec3 normal_component;
-    pp_vec3_scale(n, rv_dot_n, &normal_component);
-
-    PPVec3 ftangent;
-    pp_vec3_sub(&fvr, &normal_component, &ftangent);
-
-    float ftangent_len = pp_vec3_length(&ftangent);
-    if (ftangent_len < 1e-6f) {
-        // No tangent velocity, so no friction impulse
+    // A resting body meets its contact with up to a couple of steps' worth of
+    // gravity as approach velocity. The threshold must sit above that, or a
+    // body at rest re-bounces off its own weight every step and never settles.
+    const float bounce_threshold = fmaxf(0.1f, 3.0f * gravity_magnitude * t);
+    if (vn > -bounce_threshold) {
+        // Barely moving, or separating: no bounce.
         return;
     }
 
-    pp_vec3_scale(&ftangent, 1.0f / ftangent_len, &ftangent); // Normalize
+    m->impact = true;
 
-    // Effective mass for friction
+    float r = fmaxf(m->obj1_bounce, m->obj2_bounce);
+    m->v_bias = -r * vn;   /* vn < 0 when approaching, so this is positive (or 0) */
+}
 
-    PPVec3 lhs_rt, rhs_rt;
-    pp_vec3_cross(&lhs_pcp, &ftangent, &lhs_rt);
-    pp_vec3_cross(&rhs_pcp, &ftangent, &rhs_rt);
+/* Seed a contact's accumulators from the matching contact of the previous
+ * step. A match is the same body pair, a near-identical normal, and the
+ * nearest contact point (relative to obj1) within a small radius. Each cached
+ * contact seeds at most one new contact. */
+static void pp_match_contact(PPCollision *m)
+{
+    if (m->mass_n == 0.0f) return;
 
-    PPVec3 lhs_i_rt, rhs_i_rt;
-    pp_mat3_mult(&lhs->inv_inertia, &lhs_rt, &lhs_i_rt);
-    pp_mat3_mult(&rhs->inv_inertia, &rhs_rt, &rhs_i_rt);
+    const float match_radius_sq = 0.05f * 0.05f;
+    float best = match_radius_sq;
+    PPContactCache *hit = NULL;
 
-    PPVec3 lhs_fangular_term, rhs_fangular_term;
-    pp_vec3_cross(&lhs_i_rt, &lhs_pcp, &lhs_fangular_term);
-    pp_vec3_cross(&rhs_i_rt, &rhs_pcp, &rhs_fangular_term);
+    for (int i = 0; i < contact_cache_count; ++i) {
+        PPContactCache *c = &contact_cache[i];
+        if (c->used || c->obj1 != m->obj1 || c->obj2 != m->obj2) continue;
+        if (pp_vec3_dot(&c->n, &m->n) < 0.99f) continue;
 
-    float friction_mass = inv_mass_sum + pp_vec3_dot(&lhs_fangular_term, &ftangent)
-                          + pp_vec3_dot(&rhs_fangular_term, &ftangent);
-
-    if (friction_mass < 1e-8f) {
-        return;
+        float d = pp_vec3_dist_sq(&c->r1, &m->r1);
+        if (d < best) {
+            best = d;
+            hit = c;
+        }
     }
 
-    // Friction impulse scalar
-    float jt = -pp_vec3_dot(&fvr, &ftangent);
-    jt /= friction_mass;
+    if (!hit) return;
+    hit->used = true;
 
-    // Coulomb friction clamp
-    float max_friction = f * J;
+    m->jn = hit->jn;
+    m->jt1 = hit->jt1;
+    m->jt2 = hit->jt2;
+}
 
-    if (jt > max_friction)
-        jt = max_friction;
-    if (jt < -max_friction)
-        jt = -max_friction;
+/* Apply a contact's accumulated impulse. Done at the start of every substep:
+ * the accumulators hold the impulse needed per substep, so the solver begins
+ * each one already holding the load and only has to correct the difference. */
+static void pp_warm_start_contact(PPCollision *m)
+{
+    if (m->mass_n == 0.0f) return;
 
-    PPVec3 friction_impulse;
-    pp_vec3_scale(&ftangent, jt, &friction_impulse);
+    PPVec3 P, tmp;
+    pp_vec3_scale(&m->n, m->jn, &P);
+    pp_vec3_scale(&m->t1, m->jt1, &tmp);
+    pp_vec3_add(&P, &tmp, &P);
+    pp_vec3_scale(&m->t2, m->jt2, &tmp);
+    pp_vec3_add(&P, &tmp, &P);
 
-    // --- Apply linear impulse ---
+    pp_apply_impulse(m->obj1, m->obj2, &m->r1, &m->r2, &P);
+}
 
-    PPVec3 temp;
+/* Friction for one contact, limited by the normal impulse found so far. Every
+ * contact's friction is solved before any contact's normal impulse (see
+ * pp_physics_step): the normal pass over a face leaves transient spin between
+ * one corner and the next, and friction solved in the middle of it would turn
+ * that into real sideways momentum. It also means a contact that has not
+ * pushed yet has no grip, so first touch cannot kick a body sideways. */
+static void pp_solve_contact_friction(PPCollision *m)
+{
+    if (m->mass_n == 0.0f) return;
 
-    pp_vec3_scale(&friction_impulse, lhs->inv_mass, &temp);
-    pp_vec3_sub(&lhs->vel, &temp, &lhs->vel);
+    PPBody *lhs = m->obj1;
+    PPBody *rhs = m->obj2;
+    PPVec3 rel_vel, P, tmp;
 
-    pp_vec3_scale(&friction_impulse, rhs->inv_mass, &temp);
-    pp_vec3_add(&rhs->vel, &temp, &rhs->vel);
+    float max_friction = m->obj1_friction * m->obj2_friction * m->jn;
+    if (max_friction > 0.0f && m->mass_t1 > 0.0f && m->mass_t2 > 0.0f) {
+        pp_contact_rel_vel(lhs, rhs, &m->r1, &m->r2, &rel_vel);
 
-    // --- Apply angular impulse (matrix inertia) ---
+        float old1 = m->jt1, old2 = m->jt2;
+        float new1 = old1 - pp_vec3_dot(&rel_vel, &m->t1) * m->mass_t1;
+        float new2 = old2 - pp_vec3_dot(&rel_vel, &m->t2) * m->mass_t2;
 
-    PPVec3 fang_imp;
+        // Clamp to the friction cone as a 2D vector, so the limit is circular
+        // rather than square.
+        float len_sq = new1 * new1 + new2 * new2;
+        if (len_sq > max_friction * max_friction) {
+            float scale = max_friction / sqrtf(len_sq);
+            new1 *= scale;
+            new2 *= scale;
+        }
 
-    // lhs
-    pp_vec3_cross(&lhs_pcp, &friction_impulse, &fang_imp);
-    pp_mat3_mult(&lhs->inv_inertia, &fang_imp, &fang_imp);
-    pp_vec3_sub(&lhs->a_vel, &fang_imp, &lhs->a_vel);
+        m->jt1 = new1;
+        m->jt2 = new2;
 
-    // rhs
-    pp_vec3_cross(&rhs_pcp, &friction_impulse, &fang_imp);
-    pp_mat3_mult(&rhs->inv_inertia, &fang_imp, &fang_imp);
-    pp_vec3_add(&rhs->a_vel, &fang_imp, &rhs->a_vel);
+        pp_vec3_scale(&m->t1, new1 - old1, &P);
+        pp_vec3_scale(&m->t2, new2 - old2, &tmp);
+        pp_vec3_add(&P, &tmp, &P);
+        pp_apply_impulse(lhs, rhs, &m->r1, &m->r2, &P);
+    } else if (m->jt1 != 0.0f || m->jt2 != 0.0f) {
+        // The normal impulse has gone; so must the friction it supported.
+        pp_vec3_scale(&m->t1, -m->jt1, &P);
+        pp_vec3_scale(&m->t2, -m->jt2, &tmp);
+        pp_vec3_add(&P, &tmp, &P);
+        pp_apply_impulse(lhs, rhs, &m->r1, &m->r2, &P);
+        m->jt1 = m->jt2 = 0.0f;
+    }
+}
+
+/* Normal impulse for one contact. With use_bias the contact also pushes out
+ * overlap (softly); without it the pass only removes approach velocity, which
+ * is how the "relax" pass takes back the velocity the push-out added. `inv_h`
+ * is one over the substep length. */
+static void pp_solve_contact_normal(PPCollision *m, float inv_h, bool use_bias,
+                                    const PPSoftness *soft, const PPSoftness *static_soft)
+{
+    if (m->mass_n == 0.0f) return;
+
+    PPBody *lhs = m->obj1;
+    PPBody *rhs = m->obj2;
+    const PPVec3 *n = &m->n;
+    PPVec3 rel_vel, P;
+
+    // Current separation: the value measured by collision detection, plus
+    // whatever relative movement the substeps so far have produced at the
+    // contact point (small-angle: a turn of dtheta moves the point by
+    // dtheta x r).
+    PPVec3 d, c1, c2;
+    pp_vec3_cross(&lhs->solve_dtheta, &m->r1, &c1);
+    pp_vec3_cross(&rhs->solve_dtheta, &m->r2, &c2);
+    pp_vec3_sub(&rhs->solve_dpos, &lhs->solve_dpos, &d);
+    pp_vec3_add(&d, &c2, &d);
+    pp_vec3_sub(&d, &c1, &d);
+    float s = m->separation + pp_vec3_dot(&d, n);
+
+    float bias = 0.0f, mass_scale = 1.0f, impulse_scale = 0.0f;
+    if (s > 0.0f) {
+        // Speculative: not touching yet. Allow exactly the approach speed
+        // that closes the gap this substep, so a fast mover lands on the
+        // surface rather than stopping short of it or passing through.
+        bias = s * inv_h;
+    } else if (use_bias) {
+        const float slop = 0.005f;
+        const float max_push_speed = 3.0f;
+        const PPSoftness *k = (lhs->inv_mass == 0.0f || rhs->inv_mass == 0.0f) ? static_soft : soft;
+
+        bias = fmaxf(k->bias_rate * fminf(s + slop, 0.0f), -max_push_speed);
+        mass_scale = k->mass_scale;
+        impulse_scale = k->impulse_scale;
+    }
+
+    pp_contact_rel_vel(lhs, rhs, &m->r1, &m->r2, &rel_vel);
+    float vn = pp_vec3_dot(&rel_vel, n);
+
+    float dJ = -m->mass_n * mass_scale * (vn + bias) - impulse_scale * m->jn;
+
+    float old_jn = m->jn;
+    m->jn = fmaxf(old_jn + dJ, 0.0f);
+    if (m->jn > m->max_jn) m->max_jn = m->jn;
+
+    pp_vec3_scale(n, m->jn - old_jn, &P);
+    pp_apply_impulse(lhs, rhs, &m->r1, &m->r2, &P);
+}
+
+/* After the substeps: give bouncing contacts their rebound. Only contacts that
+ * actually pushed during the step qualify, which is what stops a speculative
+ * contact that was never reached from launching anything. */
+static void pp_apply_restitution(PPCollision *m)
+{
+    if (m->mass_n == 0.0f || m->v_bias == 0.0f || m->max_jn == 0.0f) return;
+
+    PPVec3 rel_vel, P;
+    pp_contact_rel_vel(m->obj1, m->obj2, &m->r1, &m->r2, &rel_vel);
+    float vn = pp_vec3_dot(&rel_vel, &m->n);
+
+    float old_jn = m->jn;
+    m->jn = fmaxf(old_jn + m->mass_n * (m->v_bias - vn), 0.0f);
+
+    pp_vec3_scale(&m->n, m->jn - old_jn, &P);
+    pp_apply_impulse(m->obj1, m->obj2, &m->r1, &m->r2, &P);
 }
 
 static inline bool flt_close(const float a, const float b)
@@ -2401,64 +2717,38 @@ static void pp_integrate_velocities(float t)
             continue;
         }
 
+        // vel is the velocity of the centre of mass. When that is not the body
+        // origin, the origin swings around it as the body turns.
+        bool offset_com = body->com_local.x != 0.0f || body->com_local.y != 0.0f ||
+                          body->com_local.z != 0.0f;
+        PPVec3 com;
+        if (offset_com) {
+            pp_body_world_com(body, &com);
+        }
+
         PPVec3 scaled_vel;
         pp_vec3_scale(&body->vel, t, &scaled_vel);
         pp_vec3_add(&body->pos, &scaled_vel, &body->pos);
+        pp_vec3_add(&body->solve_dpos, &scaled_vel, &body->solve_dpos);
+        PPVec3 scaled_lin = scaled_vel;
+
+        pp_vec3_scale(&body->a_vel, t, &scaled_vel);
+        pp_vec3_add(&body->solve_dtheta, &scaled_vel, &body->solve_dtheta);
 
         PPQuaternion q_rot;
         pp_quat_from_angular_velocity(&body->a_vel,
                                       t,
                                       &q_rot); // Get rotation quaternion from angular velocity
-        pp_quat_multiply(&body->rot, &q_rot, &body->rot); // Combine with current rotation
+        pp_quat_multiply(&q_rot, &body->rot, &body->rot); // a_vel is world-space: pre-multiply
         pp_quat_normalize(&body->rot);                    // Normalize the quaternion
+
+        if (offset_com) {
+            PPVec3 r;
+            pp_vec3_add(&com, &scaled_lin, &com);
+            pp_quat_transform(&body->rot, &body->com_local, &r);
+            pp_vec3_sub(&com, &r, &body->pos);
+        }
     }
-}
-
-static void pp_solve_positions(const PPCollision *manifold)
-{
-    PPBody *lhs = manifold->obj1;
-    PPBody *rhs = manifold->obj2;
-
-    if (!lhs->is_alive || !rhs->is_alive) {
-        return;
-    }
-
-    float inv_mass_sum = lhs->inv_mass + rhs->inv_mass;
-    if (inv_mass_sum < 1e-8f) {
-        return; // both static
-    }
-
-    // Recompute penetration depth.
-    PPVec3 delta;
-    pp_vec3_sub(&rhs->pos, &lhs->pos, &delta);
-
-    float penetration = manifold->dist;
-
-    if (penetration <= 0.0f)
-        return;
-
-    const float slop = 0.01f;
-    const float percent = 0.2f; // 20% correction per iteration
-
-    float correction_mag = penetration - slop;
-    if (correction_mag < 0.0f)
-        return;
-
-    correction_mag *= percent;
-
-    PPVec3 correction;
-    pp_vec3_scale(&manifold->n, correction_mag, &correction);
-
-    float lhs_ratio = lhs->inv_mass / inv_mass_sum;
-    float rhs_ratio = rhs->inv_mass / inv_mass_sum;
-
-    PPVec3 lhs_correction, rhs_correction;
-
-    pp_vec3_scale(&correction, lhs_ratio, &lhs_correction);
-    pp_vec3_scale(&correction, rhs_ratio, &rhs_correction);
-
-    pp_vec3_sub(&lhs->pos, &lhs_correction, &lhs->pos);
-    pp_vec3_add(&rhs->pos, &rhs_correction, &rhs->pos);
 }
 
 static inline void pp_shape_world_pos(const PPBody *body, const PPShape *shape, PPVec3 *out)
@@ -2469,6 +2759,7 @@ static inline void pp_shape_world_pos(const PPBody *body, const PPShape *shape, 
 }
 
 #define PP_MAX_BOX_CONTACTS 8
+#define PP_CONTACT_MARGIN 0.02f
 
 typedef struct _PPBoxContact {
     PPVec3 normal;                   /* unit, points from box A toward box B */
@@ -2574,12 +2865,19 @@ static void pp_closest_segment_segment(const PPVec3 *p1, const PPVec3 *q1,
 
 static bool pp_sat_box_box(const PPVec3 *posA, const PPQuaternion *rotA, const PPVec3 *heA, float brA,
                            const PPVec3 *posB, const PPQuaternion *rotB, const PPVec3 *heB, float brB,
-                           PPBoxContact *out)
+                           float margin, PPBoxContact *out)
 {
+    /* `margin` is how far apart the boxes may be and still produce contacts.
+     * Those contacts carry a negative depth (a gap) and the solver treats them
+     * speculatively: it only removes approach velocity that would close more
+     * than the gap this step. Without it two boxes are invisible to each other
+     * until they already overlap, so a box landing on another sinks in first
+     * and gets shoved back out afterwards. */
+
     /* Cheap bounding-sphere reject. */
     PPVec3 dc;
     pp_vec3_sub(posB, posA, &dc);
-    float sum_br = brA + brB;
+    float sum_br = brA + brB + margin;
     if (pp_vec3_dot(&dc, &dc) > sum_br * sum_br) {
         return false;
     }
@@ -2601,7 +2899,7 @@ static bool pp_sat_box_box(const PPVec3 *posA, const PPQuaternion *rotA, const P
         float rB = pp_box_project_radius(heB, ub, &L);
         float overlap = rA + rB - fabsf(pp_vec3_dot(&dc, &L));
 
-        if (overlap <= 0.0f) {
+        if (overlap <= -margin) {
             return false;
         }
 
@@ -2619,38 +2917,44 @@ static bool pp_sat_box_box(const PPVec3 *posA, const PPQuaternion *rotA, const P
         float rB = heB->xyz[j];
         float overlap = rA + rB - fabsf(pp_vec3_dot(&dc, &L));
 
-        if (overlap <= 0.0f) {
+        if (overlap <= -margin) {
             return false;
         }
 
-        if (overlap < min_overlap) {
+        // Prefer A's faces unless B's is clearly better, so two aligned boxes
+        // don't swap reference face (and shift every contact point) from one
+        // step to the next on float noise.
+        if (overlap < min_overlap - 0.02f * fabsf(min_overlap)) {
             min_overlap = overlap;
             best_axis = L;
             best_type = 1;
             best_index = j;
         }
     }
-    /* Edge-edge axes. A small relative bias keeps a face axis when an edge axis
-     * is only marginally smaller, avoiding spurious edge contacts (and the
-     * resulting jitter) on near-parallel faces. */
+    /* Edge-edge axes. A face axis is kept unless an edge axis is clearly
+     * smaller: an edge contact is a single point, so letting one narrowly win
+     * on near-parallel faces collapses a stable 4-point face manifold for a
+     * step and the box above starts to rock. */
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
             PPVec3 L;
             pp_vec3_cross(&ua[i], &ub[j], &L);
             float len = pp_vec3_length(&L);
-            if (len < 1e-6f) {
-                continue; /* near-parallel edges: degenerate axis */
+            if (len < 0.01f) {
+                // Near-parallel edges: the axis is numerically noisy, and the
+                // face axes already cover this direction.
+                continue;
             }
 
             pp_vec3_scale(&L, 1.0f / len, &L);
             float rA = pp_box_project_radius(heA, ua, &L);
             float rB = pp_box_project_radius(heB, ub, &L);
             float overlap = rA + rB - fabsf(pp_vec3_dot(&dc, &L));
-            if (overlap <= 0.0f) {
+            if (overlap <= -margin) {
                 return false;
             }
 
-            if (overlap < min_overlap * 0.999f) {
+            if (overlap < min_overlap - 0.05f * fabsf(min_overlap) - 0.002f) {
                 min_overlap = overlap;
                 best_axis = L;
                 best_type = 2;
@@ -2793,14 +3097,39 @@ static bool pp_sat_box_box(const PPVec3 *posA, const PPQuaternion *rotA, const P
     n = pp_clip_halfspace(poly, n, buf, &faceCenter, &tb,     htb);
     n = pp_clip_halfspace(buf,  n, poly, &faceCenter, &tb_neg, htb);
 
-    /* Keep clipped points that lie behind the reference face (penetrating). */
+    /* Keep clipped points behind the reference face, or within the contact
+     * margin in front of it. The latter carry a negative depth, which the
+     * solver treats as a speculative contact; they keep all corners of a
+     * resting face in the manifold from step to step. */
+    /* Two near-aligned faces with a little relative yaw clip to an octagon
+     * whose vertices come in tight pairs, one pair per corner. The pairs merge
+     * and split from step to step on float noise; every such change orphans a
+     * warm-start impulse and jolts the solve. Merge points closer than a small
+     * fraction of the face so the manifold stays the same four corners. */
+    float merge = 0.1f * fminf(hta, htb);
+    float merge_sq = merge * merge;
+
     for (int i = 0; i < n && out->count < PP_MAX_BOX_CONTACTS; ++i) {
         float pen = -pp_dot_rel(&poly[i], &faceCenter, &refN);
-        if (pen >= -1e-4f) {
-            out->points[out->count] = poly[i];
-            out->depths[out->count] = pen > 0.0f ? pen : 0.0f;
-            out->count++;
+        if (pen < -margin) {
+            continue;
         }
+
+        bool merged = false;
+        for (int k = 0; k < out->count; ++k) {
+            if (pp_vec3_dist_sq(&out->points[k], &poly[i]) < merge_sq) {
+                if (pen > out->depths[k]) out->depths[k] = pen;
+                merged = true;
+                break;
+            }
+        }
+        if (merged) {
+            continue;
+        }
+
+        out->points[out->count] = poly[i];
+        out->depths[out->count] = pen;
+        out->count++;
     }
 
     /* Degenerate fallback: if clipping produced nothing, use the deepest point. */
@@ -2810,6 +3139,81 @@ static bool pp_sat_box_box(const PPVec3 *posA, const PPQuaternion *rotA, const P
         out->count = 1;
     }
     return true;
+}
+
+/* A box lying across several coplanar triangles collects a clipped polygon
+ * from each one, so a single flat face can end up with a dozen unevenly spread
+ * contacts. Besides the solver cost, the lopsided distribution makes a soft,
+ * sequential solve push harder on the crowded side and spins the box. Reduce
+ * each group of same-normal contacts in manifolds[first, count) to at most
+ * four: the deepest, the one farthest from it, and the farthest on either side
+ * of the line through those two. Returns the new count. */
+static int pp_reduce_box_mesh_contacts(PPCollision *manifolds, int first, int count)
+{
+    int out = first;
+    int i = first;
+
+    while (i < count) {
+        // Gather the group sharing manifolds[i]'s normal to the front of [i, count).
+        PPVec3 n = manifolds[i].n;
+        int end = i + 1;
+        for (int k = i + 1; k < count; ++k) {
+            if (pp_vec3_dot(&manifolds[k].n, &n) > 0.999f) {
+                PPCollision tmp = manifolds[end];
+                manifolds[end] = manifolds[k];
+                manifolds[k] = tmp;
+                end++;
+            }
+        }
+
+        int group = end - i;
+        if (group <= 4) {
+            for (int k = i; k < end; ++k) manifolds[out++] = manifolds[k];
+            i = end;
+            continue;
+        }
+
+        int keep[4] = {-1, -1, -1, -1};
+
+        keep[0] = i;
+        for (int k = i + 1; k < end; ++k) {
+            if (manifolds[k].dist > manifolds[keep[0]].dist) keep[0] = k;
+        }
+
+        float best = -1.0f;
+        for (int k = i; k < end; ++k) {
+            PPVec3 d;
+            pp_vec3_sub(&manifolds[k].p, &manifolds[keep[0]].p, &d);
+            float l = pp_vec3_length_sq(&d);
+            if (l > best) { best = l; keep[1] = k; }
+        }
+
+        // Signed distance from the line keep[0]->keep[1], measured in the
+        // contact plane: side = n x (p1 - p0).
+        PPVec3 axis, side;
+        pp_vec3_sub(&manifolds[keep[1]].p, &manifolds[keep[0]].p, &axis);
+        pp_vec3_cross(&n, &axis, &side);
+
+        float max_side = 1e-6f, min_side = -1e-6f;
+        for (int k = i; k < end; ++k) {
+            PPVec3 d;
+            pp_vec3_sub(&manifolds[k].p, &manifolds[keep[0]].p, &d);
+            float sd = pp_vec3_dot(&d, &side);
+            if (sd > max_side) { max_side = sd; keep[2] = k; }
+            if (sd < min_side) { min_side = sd; keep[3] = k; }
+        }
+
+        PPCollision kept[4];
+        int kept_count = 0;
+        for (int k = 0; k < 4; ++k) {
+            if (keep[k] >= 0) kept[kept_count++] = manifolds[keep[k]];
+        }
+        for (int k = 0; k < kept_count; ++k) manifolds[out++] = kept[k];
+
+        i = end;
+    }
+
+    return out;
 }
 
 /* One-sided box vs triangle, matching the sphere/triangle convention: the
@@ -2845,9 +3249,21 @@ static int pp_sat_box_triangle(const PPVec3 *box_pos, const PPQuaternion *box_ro
     /* Incident face: box face whose outward normal is most opposed to n. */
     int inc = 0;
     float best = -1.0f;
+    float extent = 0.0f; /* half-width of the box measured along n */
     for (int k = 0; k < 3; ++k) {
         float a = fabsf(pp_vec3_dot(&ub[k], n));
+        extent += a * box_he->xyz[k];
         if (a > best) { best = a; inc = k; }
+    }
+
+    /* Too far above the plane for even the nearest corner to reach it this
+     * step: nothing to clip. Most broadphase candidates end here. */
+    {
+        float closing = -pp_vec3_dot(box_vel, n);
+        if (sd - extent > PP_CONTACT_MARGIN + fmaxf(closing, 0.0f) * t) {
+            out->count = 0;
+            return 0;
+        }
     }
     PPVec3 incN = ub[inc];
     if (pp_vec3_dot(&incN, n) > 0.0f) {
@@ -2904,39 +3320,45 @@ static int pp_sat_box_triangle(const PPVec3 *box_pos, const PPQuaternion *box_ro
     /* Approach speed: velocity component heading into the front face. */
     float approach = -pp_vec3_dot(box_vel, n);
 
-    /* Penetrating corners form the real, multi-point manifold (needed for a
-     * stable resting box). While the box is still entirely in front, emit a
-     * SINGLE speculative contact placed at the box centre projected onto the
-     * triangle plane. Two reasons: braking N speculative contacts independently
-     * over-applies the impulse and launches the box; and on a multi-triangle
-     * floor a box straddling an edge would otherwise get one speculative contact
-     * per triangle at conflicting offset positions. The projected centre is the
-     * same point for every coplanar triangle, so they reinforce instead of
-     * fighting, and it carries ~no lever arm so the brake adds no spin. */
-    int gap_n = 0;
-    float min_gap = FLT_MAX;
+    /* Every clipped corner that is penetrating, or close enough to reach the
+     * plane this step, becomes a contact at that corner. Depth is how far
+     * behind the plane it is: negative for a gap, which the solver treats as
+     * speculative (it only removes the approach speed that would close more
+     * than the gap).
+     *
+     * The reach never drops below the contact margin, so all four corners of a
+     * resting face stay in the manifold; with only the corners that happen to
+     * be below the plane this step, the box is supported off-centre and rocks.
+     * And because each contact sits on the corner it belongs to, a box that
+     * lands corner-first is stopped -- and bounced -- at that corner, with the
+     * lever arm that implies, rather than as if it were a ball. */
+    float travel = (approach > 0.0f) ? approach * t : 0.0f;
+    float reach = PP_CONTACT_MARGIN + travel;
+    float min_front = FLT_MAX;
 
-    for (int i = 0; i < cnt; ++i) {
+    for (int i = 0; i < cnt && out->count < PP_MAX_BOX_CONTACTS; ++i) {
         float front = pp_dot_rel(&src[i], &tri->v[0], n); /* >0 in front, <0 behind */
-        if (front <= 0.0f) {
-            /* Penetrating: real contact, depth = how far behind the plane. */
-            if (out->count < PP_MAX_BOX_CONTACTS) {
-                out->points[out->count] = src[i];
-                out->depths[out->count] = -front;
-                out->count++;
-            }
-        } else {
-            gap_n++;
-            if (front < min_gap) min_gap = front;
+        if (front < min_front) min_front = front;
+        if (front <= reach) {
+            out->points[out->count] = src[i];
+            out->depths[out->count] = -front;
+            out->count++;
         }
     }
 
-    if (out->count == 0 && gap_n > 0 && approach > 0.0f && min_gap <= approach * t) {
-        PPVec3 off, cp;
+    /* The exception is a box moving further in one step than it is wide, caught
+     * while still clear of the surface. Stopping that across several corners
+     * leaves a small fraction of the impulse behind as spin, and a small
+     * fraction of a huge impulse is enough to fling the box away. Corner detail
+     * means nothing at that speed anyway, so brake it with one contact at the
+     * box centre projected onto the plane: no lever arm, no spin, and the same
+     * point for every coplanar triangle. The corners take over next step. */
+    float size = 2.0f * fminf(box_he->x, fminf(box_he->y, box_he->z));
+    if (out->count > 0 && travel > size && min_front > PP_CONTACT_MARGIN) {
+        PPVec3 off;
         pp_vec3_scale(n, sd, &off);
-        pp_vec3_sub(box_pos, &off, &cp); /* box centre projected onto the plane */
-        out->points[0] = cp;
-        out->depths[0] = -min_gap; /* negative -> gap -> caller forms separation */
+        pp_vec3_sub(box_pos, &off, &out->points[0]);
+        out->depths[0] = -min_front;
         out->count = 1;
     }
     return out->count;
@@ -2946,6 +3368,32 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
 {
     int manifold_count = 0;
     static PPCollision manifolds[PICOPHYSICS_MAX_MANIFOLDS];
+
+    /* Candidate triangles from the host query, refilled once per shape. Static
+     * rather than a stack local: PICOPHYSICS_MAX_QUERY_TRIANGLES triangles is
+     * several kilobytes, which is more than a Dreamcast thread stack wants to
+     * carry. Unused when no query is set. */
+    static PPTriangle tri_candidates[PICOPHYSICS_MAX_QUERY_TRIANGLES];
+
+    tri_query_overflows = 0;
+    tri_query_max_candidates = 0;
+
+    for (int i = 0; i < object_count; ++i) {
+        if (objects[i].is_alive && objects[i].inv_mass != 0.0f) {
+            pp_body_update_world_inertia(&objects[i]);
+        }
+    }
+
+    // Bounding sphere of each body, grown by how far it can move this step, so
+    // the pair loop below can discard distant bodies before doing any per-shape
+    // work.
+    static float body_reach[PICOPHYSICS_MAX_OBJECTS];
+    for (int i = 0; i < object_count; ++i) {
+        if (objects[i].is_alive && objects[i].shape_count > 0) {
+            body_reach[i] = pp_body_get_radius(&objects[i]) + PP_CONTACT_MARGIN +
+                            pp_vec3_length(&objects[i].vel) * t;
+        }
+    }
 
     for (int i = 0; i < object_count; ++i) {
         PPBody *lhs_body = &objects[i];
@@ -2980,7 +3428,7 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
             // still considered, so it can be caught speculatively before it
             // tunnels through a triangle.
             float speed = pp_vec3_length(&lhs_body->vel);
-            float reach = radius + speed * t;
+            float reach = radius + PP_CONTACT_MARGIN + speed * t;
             float reach_sq = reach * reach;
 
             // Box/triangle contacts are deduplicated across triangles for this
@@ -2992,10 +3440,33 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
             PPVec3 emitted_pt[32];
             PPVec3 emitted_n[32];
             int emitted_count = 0;
+            int shape_first_manifold = manifold_count;
+
+            /* Source of static triangles for this shape: either the host's
+             * broadphase, asked once here (not once per solver iteration --
+             * the solver runs later, over the manifolds this loop builds), or
+             * the global tris[] array when no query is set. */
+            const PPTriangle *tri_src = tris;
+            int tri_src_count = tri_count;
+            if (tri_query) {
+                tri_src = tri_candidates;
+                tri_src_count = tri_query(&shape_pos, reach, tri_candidates,
+                                          PICOPHYSICS_MAX_QUERY_TRIANGLES,
+                                          tri_query_user);
+                if (tri_src_count < 0) {
+                    tri_src_count = 0;
+                } else if (tri_src_count >= PICOPHYSICS_MAX_QUERY_TRIANGLES) {
+                    tri_src_count = PICOPHYSICS_MAX_QUERY_TRIANGLES;
+                    tri_query_overflows++;
+                }
+                if (tri_src_count > tri_query_max_candidates) {
+                    tri_query_max_candidates = tri_src_count;
+                }
+            }
 
             int last_kind = -1;
-            for (int j = 0; j < tri_count; ++j) {
-                const PPTriangle *tri = tris + j;
+            for (int j = 0; j < tri_src_count; ++j) {
+                const PPTriangle *tri = tri_src + j;
 
                 float dx = fmaxf(0.0f, fmaxf(tri->aabb_min_x - pos_x, pos_x - tri->aabb_max_x));
                 float dy = fmaxf(0.0f, fmaxf(tri->aabb_min_y - pos_y, pos_y - tri->aabb_max_y));
@@ -3026,8 +3497,11 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                         // has a gap but is approaching fast enough to close it this
                         // step -- a speculative contact that stops fast spheres
                         // tunnelling through the triangle.
+                        // A small margin keeps a resting sphere's contact alive
+                        // from step to step even when it sits a hair above the
+                        // surface; the solver treats the gap speculatively.
                         bool contact = false;
-                        if (separation <= 0.0f) {
+                        if (separation <= PP_CONTACT_MARGIN) {
                             contact = true;
                         } else {
                             float approach = -pp_vec3_dot(&lhs_body->vel, &tri->n);
@@ -3124,6 +3598,10 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                     }
                 }
             }
+            if (lhs_shape->type == PP_OBJECT_TYPE_BOX) {
+                manifold_count = pp_reduce_box_mesh_contacts(manifolds, shape_first_manifold,
+                                                             manifold_count);
+            }
         }
 
         // Body-body collisions
@@ -3131,6 +3609,11 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
             PPBody *rhs_body = &objects[j];
 
             if (!rhs_body->is_alive || rhs_body->shape_count == 0) {
+                continue;
+            }
+
+            float pair_reach = body_reach[i] + body_reach[j];
+            if (pp_vec3_dist_sq(&lhs_body->pos, &rhs_body->pos) > pair_reach * pair_reach) {
                 continue;
             }
 
@@ -3153,7 +3636,8 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                     if (lhs_shape->type == PP_OBJECT_TYPE_SPHERE && rhs_shape->type == PP_OBJECT_TYPE_SPHERE) {
                         float dist = pp_vec3_dist_sq(&lhs_spos, &rhs_spos);
                         float radius_sum = lhs_shape->sphere.radius + rhs_shape->sphere.radius;
-                        if (dist <= (radius_sum * radius_sum)) {
+                        float reach_sum = radius_sum + PP_CONTACT_MARGIN;
+                        if (dist <= (reach_sum * reach_sum)) {
                             dist = sqrtf(dist);
                             PPCollision c;
                             pp_fill_collision_info_sphere_sphere(lhs_body, lhs_shape, &lhs_spos,
@@ -3215,10 +3699,16 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                     } else if (lhs_shape->type == PP_OBJECT_TYPE_BOX && rhs_shape->type == PP_OBJECT_TYPE_BOX) {
                         // Box vs Box via SAT, producing a multi-point manifold.
                         PPBoxContact bc;
+                        // Reach far enough to catch anything the pair could
+                        // close this step.
+                        PPVec3 rel_v;
+                        pp_vec3_sub(&rhs_body->vel, &lhs_body->vel, &rel_v);
+                        float margin = PP_CONTACT_MARGIN + pp_vec3_length(&rel_v) * t;
+
                         if (pp_sat_box_box(&lhs_spos, &lhs_body->rot, &lhs_shape->box.half_extents,
                                            lhs_shape->box.bounding_radius,
                                            &rhs_spos, &rhs_body->rot, &rhs_shape->box.half_extents,
-                                           rhs_shape->box.bounding_radius, &bc)) {
+                                           rhs_shape->box.bounding_radius, margin, &bc)) {
                             // The callback decides per-pair; query it once using the
                             // deepest contact as the representative collision.
                             int deepest = 0;
@@ -3269,26 +3759,122 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
         }
     }
 
-    pp_integrate_forces(t);
+    for (int i = 0; i < manifold_count; ++i) {
+        pp_prepare_contact(&manifolds[i], t);
+        pp_match_contact(&manifolds[i]);
+    }
 
-    for (int j = 0; j < vel_iterations; ++j) {
-        for (int i = 0; i < manifold_count; ++i) {
-            pp_solve_velocities(&manifolds[i], t);
-        }
+    for (int i = 0; i < object_count; ++i) {
+        pp_vec3_init(&objects[i].solve_dpos);
+        pp_vec3_init(&objects[i].solve_dtheta);
+    }
 
-        for(int i = 0; i < constraint_count; ++i) {
-            pp_solve_constraint_velocities(&constraints[i], t);
+    /* Soft step (after Box2D v3 / Box3D). The step is cut into substeps, each
+     * of which integrates forces, makes one solving pass that also pushes out
+     * overlap, moves the bodies, then makes a second "relax" pass that takes
+     * back the velocity the push-out added. Contacts are not re-detected in
+     * between; they track their own separation from how the bodies moved.
+     *
+     * For the same number of passes this converges far better than iterating
+     * on one big step: a load only has to travel one contact per pass, but a
+     * substep is short enough that being a few contacts behind costs almost
+     * nothing. It is what lets a tall stack stand on a handful of passes. */
+    int substeps = vel_iterations / 2;
+    if (substeps < 1) substeps = 1;
+
+    float h = t / (float) substeps;
+    float inv_h = (h > 0.0f) ? 1.0f / h : 0.0f;
+
+    float contact_hertz = fminf(30.0f, 0.25f * inv_h);
+    PPSoftness soft = pp_make_soft(contact_hertz, 10.0f, h);
+    PPSoftness static_soft = pp_make_soft(2.0f * contact_hertz, 10.0f, h);
+
+    // A hard landing on several contacts at once leaves a single sequential
+    // sweep well short of converged: the first corner takes the whole blow,
+    // the rest only partly undo the spin that causes, and friction then turns
+    // what is left into sideways motion. Such steps are rare, so spend extra
+    // normal sweeps on them and nothing on the usual resting step.
+    int normal_sweeps = 1;
+    for (int i = 0; i < manifold_count; ++i) {
+        if (manifolds[i].impact) {
+            normal_sweeps = 4;
+            break;
         }
     }
 
-    pp_integrate_velocities(t);
+    for (int sub = 0; sub < substeps; ++sub) {
+        pp_integrate_forces(h, t, sub == substeps - 1);
 
-    for (int j = 0; j < pos_iterations; ++j) {
         for (int i = 0; i < manifold_count; ++i) {
-            pp_solve_positions(&manifolds[i]);
+            pp_warm_start_contact(&manifolds[i]);
         }
 
-        for(int i = 0; i < constraint_count; ++i) {
+        for (int i = 0; i < manifold_count; ++i) {
+            pp_solve_contact_friction(&manifolds[i]);
+        }
+        for (int j = 0; j < normal_sweeps; ++j) {
+            for (int i = 0; i < manifold_count; ++i) {
+                pp_solve_contact_normal(&manifolds[i], inv_h, true, &soft, &static_soft);
+            }
+        }
+
+        for (int i = 0; i < constraint_count; ++i) {
+            pp_solve_constraint_velocities(&constraints[i], h);
+        }
+
+        pp_integrate_velocities(h);
+
+        for (int i = 0; i < manifold_count; ++i) {
+            pp_solve_contact_friction(&manifolds[i]);
+        }
+        for (int j = 0; j < normal_sweeps; ++j) {
+            for (int i = 0; i < manifold_count; ++i) {
+                pp_solve_contact_normal(&manifolds[i], inv_h, false, &soft, &static_soft);
+            }
+        }
+    }
+
+    // Several sweeps rather than one: contacts on the same body share its
+    // rebound, and a single sequential sweep leaves whichever went first
+    // short-changed, which shows up as spin on a symmetric impact. Skipped
+    // entirely on the (usual) step where nothing is bouncing.
+    bool bouncing = false;
+    for (int i = 0; i < manifold_count && !bouncing; ++i) {
+        bouncing = manifolds[i].v_bias != 0.0f && manifolds[i].max_jn != 0.0f;
+    }
+
+    for (int j = 0; bouncing && j < 8; ++j) {
+        for (int i = 0; i < manifold_count; ++i) {
+            pp_apply_restitution(&manifolds[i]);
+        }
+    }
+
+    // Remember the solved impulses for the next step's warm start.
+    contact_cache_count = manifold_count;
+    for (int i = 0; i < manifold_count; ++i) {
+        const PPCollision *m = &manifolds[i];
+        PPContactCache *c = &contact_cache[i];
+        c->obj1 = m->obj1;
+        c->obj2 = m->obj2;
+        c->r1 = m->r1;
+        c->n = m->n;
+        // Only a sustained load is worth carrying over. The impulse that
+        // stopped an impact (or bounced it) was a one-off; replayed next step
+        // it would launch the body back the way it came.
+        if (m->impact) {
+            c->jn = c->jt1 = c->jt2 = 0.0f;
+        } else {
+            c->jn = m->jn;
+            c->jt1 = m->jt1;
+            c->jt2 = m->jt2;
+        }
+        c->used = false;
+    }
+
+    // Contacts are pushed out by the substeps above; only the constraints
+    // still have a separate position pass.
+    for (int j = 0; j < pos_iterations; ++j) {
+        for (int i = 0; i < constraint_count; ++i) {
             pp_solve_constraint_positions(&constraints[i], t);
         }
     }
