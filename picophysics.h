@@ -31,7 +31,8 @@
  *   contact manifold, so boxes rest and stack stably)
  * - Triangles (static environment, not a body shape)
  *
- * Bodies can also be joined together through constraints. Currently only fixed distance constraints are supported.
+ * Bodies can also be joined together through constraints: fixed distance, ball
+ * joints, and hinges with optional angle limits and a motor.
  *
  * Ray-casting the world is also supported.
  *
@@ -269,11 +270,43 @@ typedef enum _PPAxisLock {
 typedef enum _PPConstraintType {
     PP_CONSTRAINT_TYPE_FIXED_DISTANCE,
     PP_CONSTRAINT_TYPE_FIXED,
+    PP_CONSTRAINT_TYPE_BALL,
+    PP_CONSTRAINT_TYPE_HINGE,
 } PPConstraintType;
 
 typedef struct _PPFixedDistanceConstraint {
     float distance;
 } PPFixedDistanceConstraint;
+
+/* Ball and hinge joints. Anchors, axes and reference directions are stored in
+ * each body's local space; everything from `impulse` down is solver state. */
+typedef struct _PPJointConstraint {
+    PPVec3 local_anchor1, local_anchor2;
+    PPVec3 local_axis1, local_axis2;
+    PPVec3 local_ref1, local_ref2;
+
+    bool collide_connected;
+
+    bool limit_enabled;
+    float lower_angle, upper_angle;
+
+    bool motor_enabled;
+    float motor_speed, max_motor_torque;
+
+    PPVec3 impulse;
+    float axial_impulse[2];
+    float motor_impulse, lower_impulse, upper_impulse;
+
+    PPVec3 r1, r2;
+    PPVec3 separation;
+    PPMat3 inv_k;
+    PPVec3 axis;
+    PPVec3 u[2];
+    float u_error[2];
+    float u_mass[2];
+    float axis_mass;
+    float angle;
+} PPJointConstraint;
 
 typedef struct _PPConstraint {
     bool is_alive;
@@ -283,6 +316,7 @@ typedef struct _PPConstraint {
 
     union {
         PPFixedDistanceConstraint fixed_distance;
+        PPJointConstraint joint;
     };
 
     // Combined mass of both bodies.
@@ -408,6 +442,34 @@ bool pp_physics_ray_intersect(const PPVec3 *origin,
                               const PPTriangle **tri_hit,
                               float *distance,
                               PPVec3 *intersection);
+
+/* What a ray hit. `body` is NULL when it was the static world. `kind` is the
+ * triangle's or the shape's kind, so it can double as a surface type (tarmac,
+ * gravel, ...). `normal` is unit length and faces back towards the ray. */
+typedef struct _PPRayHit {
+    const PPBody *body;
+    BodyKind kind;
+    float distance;
+    PPVec3 point;
+    PPVec3 normal;
+} PPRayHit;
+
+/* Nearest hit along a ray no longer than max_distance; `direction` need not be
+ * unit length. Unlike pp_physics_ray_intersect() this goes through the
+ * triangle query when one is set, asking only for the triangles around the
+ * ray, so its cost depends on the ray's length and not on the size of the
+ * world: a short ray under a wheel touches a handful of triangles. A query
+ * that comes back full is split in two and retried, nearest half first.
+ *
+ * ignore_kinds is a 0-terminated array or NULL. ignore_body (may be NULL) is
+ * skipped entirely: the ray's owner, usually. A ray that starts inside a
+ * body does not hit that body. */
+bool pp_physics_ray_cast(const PPVec3 *origin,
+                         const PPVec3 *direction,
+                         float max_distance,
+                         BodyKind *ignore_kinds,
+                         const PPBody *ignore_body,
+                         PPRayHit *hit);
 void pp_physics_clear();
 void pp_physics_set_gravity(const PPVec3 *v);
 bool pp_physics_collision_map_add(BodyKind kind1,
@@ -482,6 +544,35 @@ const PPShape *pp_body_get_shape(const PPBody *body, size_t index);
 
 size_t pp_body_get_constraint_count(PPBody *body);
 PPConstraint* pp_physics_create_fixed_distance_constraint(PPBody* body1, PPBody* body2, float distance);
+
+/* Joints. A ball joint pins a point of body1 to a point of body2 and leaves
+ * them free to turn about it (rope links, ragdoll shoulders, a wrecking ball).
+ * A hinge also keeps one axis of each body lined up, so the only freedom left
+ * is turning about that axis (doors, wheels, flippers, drawbridges).
+ *
+ * The anchor and axis are given in world space, for the bodies as they are
+ * posed at the time of the call. Either body may be NULL to pin the other to
+ * the world. Jointed bodies do not collide with each other unless
+ * pp_constraint_set_collide_connected() says so. Returns NULL when
+ * PICOPHYSICS_MAX_CONSTRAINTS is reached.
+ *
+ * Joints have no friction of their own, so a chain swings for a long time on
+ * the default body damping; raise pp_body_set_damping() and
+ * pp_body_set_angular_damping() on the links if it should settle. */
+PPConstraint* pp_physics_create_ball_joint(PPBody* body1, PPBody* body2, const PPVec3* world_anchor);
+PPConstraint* pp_physics_create_hinge_joint(PPBody* body1, PPBody* body2, const PPVec3* world_anchor, const PPVec3* world_axis);
+void pp_physics_destroy_constraint(PPConstraint* c);
+void pp_constraint_set_collide_connected(PPConstraint* c, bool collide);
+
+/* The hinge angle is how far body2 has turned about the axis relative to
+ * body1 since the joint was made, in radians, within (-pi, pi]. Limits have to
+ * lie inside that interval, with lower <= upper. */
+float pp_constraint_get_hinge_angle(const PPConstraint* c);
+void pp_constraint_set_hinge_limits(PPConstraint* c, float lower, float upper);
+void pp_constraint_disable_hinge_limits(PPConstraint* c);
+/* Drives the hinge towards `speed` rad/s using at most `max_torque`. A speed
+ * of zero makes a stiff, braked hinge; a max_torque of zero turns it off. */
+void pp_constraint_set_hinge_motor(PPConstraint* c, float speed, float max_torque);
 
 void pp_physics_destroy_body(PPBody *b);
 
@@ -1109,6 +1200,10 @@ bool pp_contains_kind(BodyKind *kinds, BodyKind kind)
  * origin to the hit will be returned.
  *
  * ignore_kinds is an array of kinds to ignore, with a 0 terminated final entry.
+ *
+ * The ray is unbounded, so this tests every triangle in the global tris[]
+ * array and cannot see a world supplied through pp_physics_set_triangle_query().
+ * Use pp_physics_ray_cast() for that, and for anything called every frame.
  */
 bool pp_physics_ray_intersect(const PPVec3 *origin,
                               const PPVec3 *direction,
@@ -1244,7 +1339,22 @@ bool pp_aabb_intersect(const PPVec3 *pos,
 bool pp_box_intersect(
     const PPVec3 *box_pos, const PPQuaternion *box_rot, const PPVec3 *whd, const PPVec3 *o, const PPVec3 *d, PPVec3 *out, float *distance)
 {
-    return pp_aabb_intersect(box_pos, whd, o, d, out, distance);
+    // Into the box's own frame, where it is axis aligned about the origin.
+    PPQuaternion inv;
+    PPVec3 rel, lo, ld, lhit;
+    PPVec3 zero = {.xyz = {0.0f, 0.0f, 0.0f}};
+    pp_quat_conjugate(box_rot, &inv);
+    pp_vec3_sub(o, box_pos, &rel);
+    pp_quat_transform(&inv, &rel, &lo);
+    pp_quat_transform(&inv, d, &ld);
+
+    if (!pp_aabb_intersect(&zero, whd, &lo, &ld, &lhit, distance)) {
+        return false;
+    }
+
+    pp_quat_transform(box_rot, &lhit, out);
+    pp_vec3_add(box_pos, out, out);
+    return true;
 }
 
 bool pp_sphere_intersect(
@@ -2158,7 +2268,7 @@ PPBody *pp_physics_create_sphere(float radius, const PPVec3 *pos, float mass, Bo
     return body;
 }
 
-PPConstraint* pp_physics_create_fixed_distance_constraint(PPBody* body1, PPBody* body2, float distance) {
+static PPConstraint* pp_constraint_alloc(void) {
     PPConstraint* entry = NULL;
 
     if(dead_constraint_count) {
@@ -2170,8 +2280,21 @@ PPConstraint* pp_physics_create_fixed_distance_constraint(PPBody* body1, PPBody*
                 break;
             }
         }
-    } else {
+    } else if(constraint_count < PICOPHYSICS_MAX_CONSTRAINTS) {
         entry = &constraints[constraint_count++];
+    }
+
+    if(entry) {
+        memset(entry, 0, sizeof(PPConstraint));
+    }
+
+    return entry;
+}
+
+PPConstraint* pp_physics_create_fixed_distance_constraint(PPBody* body1, PPBody* body2, float distance) {
+    PPConstraint* entry = pp_constraint_alloc();
+    if(!entry) {
+        return NULL;
     }
 
     entry->is_alive = true;
@@ -2514,7 +2637,9 @@ static void pp_solve_constraint_velocities(PPConstraint* entry, float dt) {
         return;
     }
 
-    if (entry->type == PP_CONSTRAINT_TYPE_FIXED_DISTANCE) {
+    if (entry->type == PP_CONSTRAINT_TYPE_BALL || entry->type == PP_CONSTRAINT_TYPE_HINGE) {
+        // Joints are solved alongside the contacts, see pp_joint_solve().
+    } else if (entry->type == PP_CONSTRAINT_TYPE_FIXED_DISTANCE) {
         pp_solve_constraint_fixed_distance_velocities(b1,
                                                       b2,
                                                       entry->inv_mass_sum,
@@ -2573,7 +2698,9 @@ static void pp_solve_constraint_positions(PPConstraint *entry, float dt)
         return;
     }
 
-    if(entry->type == PP_CONSTRAINT_TYPE_FIXED_DISTANCE){
+    if (entry->type == PP_CONSTRAINT_TYPE_BALL || entry->type == PP_CONSTRAINT_TYPE_HINGE) {
+        // Soft constraints: the velocity solve already closes the gap.
+    } else if(entry->type == PP_CONSTRAINT_TYPE_FIXED_DISTANCE){
         pp_solve_constraint_fixed_distance_positions(b1,
                                                      b2,
                                                      entry->inv_mass_sum,
@@ -2687,6 +2814,368 @@ static inline void pp_body_world_com(const PPBody *body, PPVec3 *out)
     PPVec3 r;
     pp_quat_transform(&body->rot, &body->com_local, &r);
     pp_vec3_add(&body->pos, &r, out);
+}
+
+/* ---- Ball and hinge joints ------------------------------------------------
+ *
+ * Solved the same way as the contacts: once per substep, as soft constraints
+ * with the accumulated impulse carried from one substep (and step) to the
+ * next. body1 is the lhs of every impulse, body2 the rhs. */
+
+static inline bool pp_constraint_is_joint(const PPConstraint *c)
+{
+    return c->type == PP_CONSTRAINT_TYPE_BALL || c->type == PP_CONSTRAINT_TYPE_HINGE;
+}
+
+/* trimesh_body stands in for the world. Its rotation is not a valid
+ * quaternion, so it is treated as identity here. */
+static void pp_joint_dir_to_world(const PPBody *b, const PPVec3 *local, PPVec3 *out)
+{
+    if (b == &trimesh_body) {
+        *out = *local;
+        return;
+    }
+
+    pp_quat_transform(&b->rot, local, out);
+}
+
+static void pp_joint_dir_to_local(const PPBody *b, const PPVec3 *world, PPVec3 *out)
+{
+    if (b == &trimesh_body) {
+        *out = *world;
+        return;
+    }
+
+    PPQuaternion inv;
+    pp_quat_conjugate(&b->rot, &inv);
+    pp_quat_transform(&inv, world, out);
+}
+
+static PPConstraint* pp_joint_create(PPConstraintType type, PPBody* body1, PPBody* body2, const PPVec3* world_anchor)
+{
+    if (!body1) body1 = &trimesh_body;
+    if (!body2) body2 = &trimesh_body;
+    assert(body1 != body2);
+
+    PPConstraint* entry = pp_constraint_alloc();
+    if (!entry) {
+        return NULL;
+    }
+
+    entry->is_alive = true;
+    entry->type = type;
+    entry->body1 = body1;
+    entry->body2 = body2;
+    entry->inv_mass_sum = body1->inv_mass + body2->inv_mass;
+
+    PPVec3 rel;
+    pp_vec3_sub(world_anchor, &body1->pos, &rel);
+    pp_joint_dir_to_local(body1, &rel, &entry->joint.local_anchor1);
+    pp_vec3_sub(world_anchor, &body2->pos, &rel);
+    pp_joint_dir_to_local(body2, &rel, &entry->joint.local_anchor2);
+
+    pp_body_wake(body1);
+    pp_body_wake(body2);
+    return entry;
+}
+
+PPConstraint* pp_physics_create_ball_joint(PPBody* body1, PPBody* body2, const PPVec3* world_anchor)
+{
+    return pp_joint_create(PP_CONSTRAINT_TYPE_BALL, body1, body2, world_anchor);
+}
+
+PPConstraint* pp_physics_create_hinge_joint(PPBody* body1, PPBody* body2, const PPVec3* world_anchor, const PPVec3* world_axis)
+{
+    PPConstraint* entry = pp_joint_create(PP_CONSTRAINT_TYPE_HINGE, body1, body2, world_anchor);
+    if (!entry) {
+        return NULL;
+    }
+
+    PPJointConstraint *j = &entry->joint;
+
+    PPVec3 axis = *world_axis;
+    float len = pp_vec3_length(&axis);
+    if (len < 1e-6f) {
+        pp_vec3_set(&axis, 0.0f, 1.0f, 0.0f);
+    } else {
+        pp_vec3_scale(&axis, 1.0f / len, &axis);
+    }
+
+    // Any direction square to the axis will do as the zero-angle reference.
+    PPVec3 ref, other;
+    if (fabsf(axis.x) < 0.57f) pp_vec3_set(&other, 1.0f, 0.0f, 0.0f);
+    else pp_vec3_set(&other, 0.0f, 1.0f, 0.0f);
+    pp_vec3_cross(&axis, &other, &ref);
+    pp_vec3_scale(&ref, 1.0f / pp_vec3_length(&ref), &ref);
+
+    pp_joint_dir_to_local(entry->body1, &axis, &j->local_axis1);
+    pp_joint_dir_to_local(entry->body2, &axis, &j->local_axis2);
+    pp_joint_dir_to_local(entry->body1, &ref, &j->local_ref1);
+    pp_joint_dir_to_local(entry->body2, &ref, &j->local_ref2);
+    return entry;
+}
+
+void pp_physics_destroy_constraint(PPConstraint* c)
+{
+    if (!c || !c->is_alive) {
+        return;
+    }
+
+    pp_body_wake(c->body1);
+    pp_body_wake(c->body2);
+    c->is_alive = false;
+    ++dead_constraint_count;
+}
+
+void pp_constraint_set_collide_connected(PPConstraint* c, bool collide)
+{
+    c->joint.collide_connected = collide;
+}
+
+void pp_constraint_set_hinge_limits(PPConstraint* c, float lower, float upper)
+{
+    assert(c->type == PP_CONSTRAINT_TYPE_HINGE);
+    c->joint.limit_enabled = true;
+    c->joint.lower_angle = fminf(lower, upper);
+    c->joint.upper_angle = fmaxf(lower, upper);
+    c->joint.lower_impulse = 0.0f;
+    c->joint.upper_impulse = 0.0f;
+    pp_body_wake(c->body1);
+    pp_body_wake(c->body2);
+}
+
+void pp_constraint_disable_hinge_limits(PPConstraint* c)
+{
+    c->joint.limit_enabled = false;
+    c->joint.lower_impulse = 0.0f;
+    c->joint.upper_impulse = 0.0f;
+    pp_body_wake(c->body1);
+    pp_body_wake(c->body2);
+}
+
+void pp_constraint_set_hinge_motor(PPConstraint* c, float speed, float max_torque)
+{
+    assert(c->type == PP_CONSTRAINT_TYPE_HINGE);
+    c->joint.motor_enabled = max_torque > 0.0f;
+    c->joint.motor_speed = speed;
+    c->joint.max_motor_torque = max_torque;
+    c->joint.motor_impulse = 0.0f;
+    pp_body_wake(c->body1);
+    pp_body_wake(c->body2);
+}
+
+static float pp_joint_hinge_angle(const PPConstraint* c, const PPVec3 *axis, const PPVec3 *ref1)
+{
+    PPVec3 ref2, s;
+    pp_joint_dir_to_world(c->body2, &c->joint.local_ref2, &ref2);
+    pp_vec3_cross(ref1, &ref2, &s);
+    return atan2f(pp_vec3_dot(&s, axis), pp_vec3_dot(ref1, &ref2));
+}
+
+float pp_constraint_get_hinge_angle(const PPConstraint* c)
+{
+    if (c->type != PP_CONSTRAINT_TYPE_HINGE) {
+        return 0.0f;
+    }
+
+    PPVec3 axis, ref1;
+    pp_joint_dir_to_world(c->body1, &c->joint.local_axis1, &axis);
+    pp_joint_dir_to_world(c->body1, &c->joint.local_ref1, &ref1);
+    return pp_joint_hinge_angle(c, &axis, &ref1);
+}
+
+/* True when a joint says these two should pass through each other. */
+static bool pp_bodies_jointed(const PPBody *a, const PPBody *b)
+{
+    for (int i = 0; i < constraint_count; ++i) {
+        const PPConstraint *c = &constraints[i];
+        if (!c->is_alive || !pp_constraint_is_joint(c) || c->joint.collide_connected) continue;
+        if ((c->body1 == a && c->body2 == b) || (c->body1 == b && c->body2 == a)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool pp_joint_active(const PPConstraint *c)
+{
+    if (!c->is_alive || !pp_constraint_is_joint(c)) return false;
+
+    const PPBody *a = c->body1;
+    const PPBody *b = c->body2;
+    if (!a->is_alive || !b->is_alive || a->is_asleep || b->is_asleep) return false;
+    return a->inv_mass + b->inv_mass > 0.0f;
+}
+
+/* 1 / (d . (I1^-1 + I2^-1) d), the angular effective mass about d. */
+static float pp_joint_angular_mass(const PPBody *a, const PPBody *b, const PPVec3 *d)
+{
+    PPVec3 k1, k2;
+    pp_mat3_mult(&a->inv_inertia_world, d, &k1);
+    pp_mat3_mult(&b->inv_inertia_world, d, &k2);
+    float k = pp_vec3_dot(&k1, d) + pp_vec3_dot(&k2, d);
+    return (k > 1e-9f) ? 1.0f / k : 0.0f;
+}
+
+/* Angular impulse `amount` about d: minus on body1, plus on body2. */
+static void pp_joint_apply_angular(PPBody *a, PPBody *b, const PPVec3 *d, float amount)
+{
+    PPVec3 L, w;
+    pp_vec3_scale(d, amount, &L);
+    pp_mat3_mult(&a->inv_inertia_world, &L, &w);
+    pp_vec3_sub(&a->a_vel, &w, &a->a_vel);
+    pp_mat3_mult(&b->inv_inertia_world, &L, &w);
+    pp_vec3_add(&b->a_vel, &w, &b->a_vel);
+}
+
+/* Start of each substep: lever arms and effective masses for the bodies as
+ * they are now posed, then put back the impulses the joint was carrying. */
+static void pp_joint_prepare(PPConstraint *c)
+{
+    PPJointConstraint *j = &c->joint;
+    PPBody *a = c->body1;
+    PPBody *b = c->body2;
+
+    PPVec3 tmp, com1, com2;
+    pp_vec3_sub(&j->local_anchor1, &a->com_local, &tmp);
+    pp_joint_dir_to_world(a, &tmp, &j->r1);
+    pp_vec3_sub(&j->local_anchor2, &b->com_local, &tmp);
+    pp_joint_dir_to_world(b, &tmp, &j->r2);
+
+    pp_body_world_com(a, &com1);
+    pp_body_world_com(b, &com2);
+    pp_vec3_add(&com2, &j->r2, &j->separation);
+    pp_vec3_sub(&j->separation, &com1, &j->separation);
+    pp_vec3_sub(&j->separation, &j->r1, &j->separation);
+
+    // K = (m1 + m2) - [r1]x I1^-1 [r1]x - [r2]x I2^-1 [r2]x, a column at a
+    // time: column e is the velocity the anchor gains from a unit impulse e.
+    PPMat3 k;
+    float inv_mass_sum = a->inv_mass + b->inv_mass;
+    for (int col = 0; col < 3; ++col) {
+        PPVec3 e = {.xyz = {0.0f, 0.0f, 0.0f}};
+        PPVec3 rxe, w, v;
+        e.xyz[col] = 1.0f;
+
+        PPVec3 out;
+        pp_vec3_scale(&e, inv_mass_sum, &out);
+
+        pp_vec3_cross(&j->r1, &e, &rxe);
+        pp_mat3_mult(&a->inv_inertia_world, &rxe, &w);
+        pp_vec3_cross(&w, &j->r1, &v);
+        pp_vec3_add(&out, &v, &out);
+
+        pp_vec3_cross(&j->r2, &e, &rxe);
+        pp_mat3_mult(&b->inv_inertia_world, &rxe, &w);
+        pp_vec3_cross(&w, &j->r2, &v);
+        pp_vec3_add(&out, &v, &out);
+
+        k.m[col * 3 + 0] = out.x;
+        k.m[col * 3 + 1] = out.y;
+        k.m[col * 3 + 2] = out.z;
+    }
+    pp_mat3_inverse(&k, &j->inv_k);
+
+    pp_apply_impulse(a, b, &j->r1, &j->r2, &j->impulse);
+
+    if (c->type != PP_CONSTRAINT_TYPE_HINGE) {
+        return;
+    }
+
+    // body2's axis has to stay square to two directions that are themselves
+    // square to body1's axis. That is two rows; the axis itself stays free.
+    PPVec3 axis2, ref1, ref1b;
+    pp_joint_dir_to_world(a, &j->local_axis1, &j->axis);
+    pp_joint_dir_to_world(b, &j->local_axis2, &axis2);
+    pp_joint_dir_to_world(a, &j->local_ref1, &ref1);
+    pp_vec3_cross(&j->axis, &ref1, &ref1b);
+
+    pp_vec3_cross(&axis2, &ref1, &j->u[0]);
+    pp_vec3_cross(&axis2, &ref1b, &j->u[1]);
+    j->u_error[0] = pp_vec3_dot(&ref1, &axis2);
+    j->u_error[1] = pp_vec3_dot(&ref1b, &axis2);
+    j->u_mass[0] = pp_joint_angular_mass(a, b, &j->u[0]);
+    j->u_mass[1] = pp_joint_angular_mass(a, b, &j->u[1]);
+    j->axis_mass = pp_joint_angular_mass(a, b, &j->axis);
+
+    if (j->limit_enabled) {
+        j->angle = pp_joint_hinge_angle(c, &j->axis, &ref1);
+    }
+
+    pp_joint_apply_angular(a, b, &j->u[0], j->axial_impulse[0]);
+    pp_joint_apply_angular(a, b, &j->u[1], j->axial_impulse[1]);
+    pp_joint_apply_angular(a, b, &j->axis, j->motor_impulse + j->lower_impulse - j->upper_impulse);
+}
+
+static void pp_joint_solve(PPConstraint *c, float h, float inv_h, bool use_bias, const PPSoftness *soft)
+{
+    PPJointConstraint *j = &c->joint;
+    PPBody *a = c->body1;
+    PPBody *b = c->body2;
+
+    float mass_scale = use_bias ? soft->mass_scale : 1.0f;
+    float impulse_scale = use_bias ? soft->impulse_scale : 0.0f;
+    float bias_rate = use_bias ? soft->bias_rate : 0.0f;
+
+    if (c->type == PP_CONSTRAINT_TYPE_HINGE) {
+        PPVec3 w;
+
+        if (j->motor_enabled) {
+            pp_vec3_sub(&b->a_vel, &a->a_vel, &w);
+            float cdot = pp_vec3_dot(&w, &j->axis) - j->motor_speed;
+            float limit = j->max_motor_torque * h;
+            float old = j->motor_impulse;
+            j->motor_impulse = fmaxf(-limit, fminf(limit, old - j->axis_mass * cdot));
+            pp_joint_apply_angular(a, b, &j->axis, j->motor_impulse - old);
+        }
+
+        if (j->limit_enabled) {
+            // Still short of the stop: let it close exactly that far this
+            // substep and no further. Past it: push back softly.
+            for (int side = 0; side < 2; ++side) {
+                float sign = side == 0 ? 1.0f : -1.0f;
+                float *accum = side == 0 ? &j->lower_impulse : &j->upper_impulse;
+                float err = side == 0 ? j->angle - j->lower_angle : j->upper_angle - j->angle;
+
+                float bias = 0.0f, ms = 1.0f, is = 0.0f;
+                if (err > 0.0f) {
+                    bias = err * inv_h;
+                } else if (use_bias) {
+                    bias = soft->bias_rate * err;
+                    ms = soft->mass_scale;
+                    is = soft->impulse_scale;
+                }
+
+                pp_vec3_sub(&b->a_vel, &a->a_vel, &w);
+                float cdot = sign * pp_vec3_dot(&w, &j->axis);
+                float old = *accum;
+                *accum = fmaxf(0.0f, old - j->axis_mass * ms * (cdot + bias) - is * old);
+                pp_joint_apply_angular(a, b, &j->axis, sign * (*accum - old));
+            }
+        }
+
+        for (int i = 0; i < 2; ++i) {
+            pp_vec3_sub(&b->a_vel, &a->a_vel, &w);
+            float cdot = pp_vec3_dot(&w, &j->u[i]);
+            float impulse = -j->u_mass[i] * mass_scale * (cdot + bias_rate * j->u_error[i]) -
+                            impulse_scale * j->axial_impulse[i];
+            j->axial_impulse[i] += impulse;
+            pp_joint_apply_angular(a, b, &j->u[i], impulse);
+        }
+    }
+
+    // The pin goes last so that it is the row left most nearly exact.
+    PPVec3 cdot, bias, P, tmp;
+    pp_contact_rel_vel(a, b, &j->r1, &j->r2, &cdot);
+    pp_vec3_scale(&j->separation, bias_rate, &bias);
+    pp_vec3_add(&cdot, &bias, &cdot);
+    pp_mat3_mult(&j->inv_k, &cdot, &P);
+    pp_vec3_scale(&P, -mass_scale, &P);
+    pp_vec3_scale(&j->impulse, impulse_scale, &tmp);
+    pp_vec3_sub(&P, &tmp, &P);
+    pp_vec3_add(&j->impulse, &P, &j->impulse);
+    pp_apply_impulse(a, b, &j->r1, &j->r2, &P);
 }
 
 /* Once per step, before any solving: fix a tangent basis, the lever arms and
@@ -4105,6 +4594,186 @@ static inline int pp_body_index(const PPBody *b)
     return (b >= objects && b < objects + PICOPHYSICS_MAX_OBJECTS) ? (int)(b - objects) : -1;
 }
 
+/* ---- Bounded ray cast ----------------------------------------------------- */
+
+static void pp_ray_test_triangles(const PPTriangle *list, int count,
+                                  const PPVec3 *o, const PPVec3 *d, float t_max,
+                                  BodyKind *ignore_kinds, PPRayHit *best)
+{
+    // Bounds of the part of the ray that could still produce a nearer hit.
+    float reach = fminf(t_max, best->distance);
+    PPVec3 end = {.xyz = {o->x + d->x * reach, o->y + d->y * reach, o->z + d->z * reach}};
+    float min_x = fminf(o->x, end.x), max_x = fmaxf(o->x, end.x);
+    float min_y = fminf(o->y, end.y), max_y = fmaxf(o->y, end.y);
+    float min_z = fminf(o->z, end.z), max_z = fmaxf(o->z, end.z);
+
+    for (int i = 0; i < count; ++i) {
+        const PPTriangle *t = &list[i];
+        if (t->aabb_min_x > max_x || t->aabb_max_x < min_x ||
+            t->aabb_min_y > max_y || t->aabb_max_y < min_y ||
+            t->aabb_min_z > max_z || t->aabb_max_z < min_z) {
+            continue;
+        }
+
+        PPVec3 point;
+        float dist;
+        if (!pp_tri_intersect(t, o, d, &point, &dist)) continue;
+        if (dist < 0.0f || dist > t_max || dist >= best->distance) continue;
+        if (pp_contains_kind(ignore_kinds, t->kind)) continue;
+
+        best->body = NULL;
+        best->kind = t->kind;
+        best->distance = dist;
+        best->point = point;
+        best->normal = t->n;
+        if (pp_vec3_dot(&t->n, d) > 0.0f) {
+            pp_vec3_neg(&t->n, &best->normal);
+        }
+    }
+}
+
+/* Triangles along [t0, t1] of the ray, through the host query. A query that
+ * comes back full may have dropped the triangle that matters, so that stretch
+ * is halved and asked for again. Nearest half first: a hit there ends it. */
+static void pp_ray_query_triangles(const PPVec3 *o, const PPVec3 *d, float t0, float t1,
+                                   BodyKind *ignore_kinds, int depth, PPRayHit *best)
+{
+    static PPTriangle candidates[PICOPHYSICS_MAX_QUERY_TRIANGLES];
+
+    if (t0 >= best->distance) {
+        return;
+    }
+
+    float mid = 0.5f * (t0 + t1);
+    float reach = 0.5f * (t1 - t0) + PP_CONTACT_MARGIN;
+    PPVec3 centre = {.xyz = {o->x + d->x * mid, o->y + d->y * mid, o->z + d->z * mid}};
+
+    int count = tri_query(&centre, reach, candidates, PICOPHYSICS_MAX_QUERY_TRIANGLES, tri_query_user);
+    if (count > PICOPHYSICS_MAX_QUERY_TRIANGLES) count = PICOPHYSICS_MAX_QUERY_TRIANGLES;
+
+    if (count == PICOPHYSICS_MAX_QUERY_TRIANGLES && depth < 8) {
+        pp_ray_query_triangles(o, d, t0, mid, ignore_kinds, depth + 1, best);
+        pp_ray_query_triangles(o, d, mid, t1, ignore_kinds, depth + 1, best);
+        return;
+    }
+
+    // Only hits inside this stretch count: one beyond it might be beaten by a
+    // triangle this query had no reason to return.
+    pp_ray_test_triangles(candidates, count, o, d, t1, ignore_kinds, best);
+}
+
+bool pp_physics_ray_cast(const PPVec3 *origin,
+                         const PPVec3 *direction,
+                         float max_distance,
+                         BodyKind *ignore_kinds,
+                         const PPBody *ignore_body,
+                         PPRayHit *hit)
+{
+    PPVec3 d = *direction;
+    float len = pp_vec3_length(&d);
+    if (len < 1e-12f || max_distance <= 0.0f) {
+        return false;
+    }
+    pp_vec3_scale(&d, 1.0f / len, &d);
+
+    PPRayHit best;
+    memset(&best, 0, sizeof(best));
+    best.distance = FLT_MAX;
+
+    if (tri_query) {
+        pp_ray_query_triangles(origin, &d, 0.0f, max_distance, ignore_kinds, 0, &best);
+    } else {
+        pp_ray_test_triangles(tris, tri_count, origin, &d, max_distance, ignore_kinds, &best);
+    }
+
+    for (int i = 0; i < object_count; ++i) {
+        const PPBody *body = &objects[i];
+        if (!body->is_alive || body == ignore_body || body->shape_count == 0) {
+            continue;
+        }
+
+        // Bounding sphere against the (possibly already shortened) ray.
+        float reach = fminf(max_distance, best.distance);
+        float radius = pp_body_get_radius((PPBody *) body);
+        PPVec3 rel;
+        pp_vec3_sub(&body->pos, origin, &rel);
+        float along = pp_vec3_dot(&rel, &d);
+        if (along < -radius || along > reach + radius) continue;
+        if (pp_vec3_length_sq(&rel) - along * along > radius * radius) continue;
+
+        for (int si = 0; si < body->shape_count; ++si) {
+            const PPShape *shape = &body->shapes[si];
+            if (pp_contains_kind(ignore_kinds, shape->kind)) {
+                continue;
+            }
+
+            PPVec3 spos, point, normal;
+            float dist;
+            pp_shape_world_pos(body, shape, &spos);
+
+            if (shape->type == PP_OBJECT_TYPE_SPHERE) {
+                if (!pp_sphere_intersect(&spos, shape->sphere.radius, origin, &d, &point, &dist)) continue;
+                pp_vec3_sub(&point, &spos, &normal);
+            } else if (shape->type == PP_OBJECT_TYPE_BOX) {
+                if (!pp_box_intersect(&spos, &body->rot, &shape->box.whd, origin, &d, &point, &dist)) continue;
+
+                // The face hit is the one the point sits proudest of.
+                PPQuaternion inv;
+                PPVec3 rel_hit, local;
+                pp_quat_conjugate(&body->rot, &inv);
+                pp_vec3_sub(&point, &spos, &rel_hit);
+                pp_quat_transform(&inv, &rel_hit, &local);
+
+                int axis = 0;
+                float proudest = -FLT_MAX;
+                for (int a = 0; a < 3; ++a) {
+                    float over = fabsf(local.xyz[a]) - 0.5f * shape->box.whd.xyz[a];
+                    if (over > proudest) {
+                        proudest = over;
+                        axis = a;
+                    }
+                }
+
+                PPVec3 local_n = {.xyz = {0.0f, 0.0f, 0.0f}};
+                local_n.xyz[axis] = local.xyz[axis] < 0.0f ? -1.0f : 1.0f;
+                pp_quat_transform(&body->rot, &local_n, &normal);
+            } else if (shape->type == PP_OBJECT_TYPE_CAPSULE) {
+                PPVec3 a, b, on_axis;
+                pp_capsule_segment(body, shape, &spos, &a, &b);
+                if (!pp_capsule_intersect(&a, &b, shape->capsule.radius, origin, &d, &point, &dist)) continue;
+                pp_segment_point(&a, &b, pp_segment_closest_t(&a, &b, &point), &on_axis);
+                pp_vec3_sub(&point, &on_axis, &normal);
+            } else {
+                continue;
+            }
+
+            if (dist < 0.0f || dist > max_distance || dist >= best.distance) continue;
+
+            float n_len = pp_vec3_length(&normal);
+            if (n_len > 1e-9f) {
+                pp_vec3_scale(&normal, 1.0f / n_len, &normal);
+            } else {
+                pp_vec3_neg(&d, &normal);
+            }
+
+            best.body = body;
+            best.kind = shape->kind;
+            best.distance = dist;
+            best.point = point;
+            best.normal = normal;
+        }
+    }
+
+    if (best.distance == FLT_MAX) {
+        return false;
+    }
+
+    if (hit) {
+        *hit = best;
+    }
+    return true;
+}
+
 /* Decide who goes to sleep. Bodies joined by contacts or constraints form a
  * group, and a group sleeps only when every member has been still for
  * sleep_delay: one restless body keeps the pile it is touching awake, which is
@@ -4240,6 +4909,20 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                 if (pp_vec3_dist_sq(&mover->pos, &sleeper->pos) <= pair_reach * pair_reach) {
                     pp_body_wake(sleeper);
                 }
+            }
+        }
+
+        // A sleeper jointed to something that has started moving (a kinematic
+        // platform towing it, say) has to come along.
+        for (int i = 0; i < constraint_count; ++i) {
+            const PPConstraint *c = &constraints[i];
+            if (!c->is_alive || c->body1->is_asleep == c->body2->is_asleep) continue;
+
+            PPBody *sleeper = c->body1->is_asleep ? c->body1 : c->body2;
+            const PPBody *other = c->body1->is_asleep ? c->body2 : c->body1;
+            if (other->inv_mass != 0.0f || pp_vec3_length_sq(&other->vel) > 0.0f ||
+                pp_vec3_length_sq(&other->a_vel) > 0.0f) {
+                pp_body_wake(sleeper);
             }
         }
     }
@@ -4537,6 +5220,10 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
                 continue;
             }
 
+            if (constraint_count && pp_bodies_jointed(lhs_body, rhs_body)) {
+                continue;
+            }
+
             // Iterate shape pairs
             for (int si = 0; si < lhs_body->shape_count; ++si) {
                 const PPShape *lhs_shape = &lhs_body->shapes[si];
@@ -4765,6 +5452,15 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
     float contact_hertz = fminf(30.0f, 0.25f * inv_h);
     PPSoftness soft = pp_make_soft(contact_hertz, 10.0f, h);
     PPSoftness static_soft = pp_make_soft(2.0f * contact_hertz, 10.0f, h);
+    PPSoftness joint_soft = pp_make_soft(2.0f * contact_hertz, 2.0f, h);
+
+    static PPConstraint *joints[PICOPHYSICS_MAX_CONSTRAINTS];
+    int joint_count = 0;
+    for (int i = 0; i < constraint_count; ++i) {
+        if (pp_joint_active(&constraints[i])) {
+            joints[joint_count++] = &constraints[i];
+        }
+    }
 
     // A hard landing on several contacts at once leaves a single sequential
     // sweep well short of converged: the first corner takes the whole blow,
@@ -4782,8 +5478,17 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
     for (int sub = 0; sub < substeps; ++sub) {
         pp_integrate_forces(h, t, sub == substeps - 1);
 
+        for (int i = 0; i < joint_count; ++i) {
+            pp_joint_prepare(joints[i]);
+        }
         for (int i = 0; i < manifold_count; ++i) {
             pp_warm_start_contact(&manifolds[i]);
+        }
+
+        // Joints before contacts: whatever is solved last is obeyed best, and
+        // a door leaning slightly off its hinge beats one sunk into the floor.
+        for (int i = 0; i < joint_count; ++i) {
+            pp_joint_solve(joints[i], h, inv_h, true, &joint_soft);
         }
 
         for (int i = 0; i < manifold_count; ++i) {
@@ -4801,6 +5506,9 @@ void pp_physics_step(float t, int vel_iterations, int pos_iterations)
 
         pp_integrate_velocities(h);
 
+        for (int i = 0; i < joint_count; ++i) {
+            pp_joint_solve(joints[i], h, inv_h, false, &joint_soft);
+        }
         for (int i = 0; i < manifold_count; ++i) {
             pp_solve_contact_friction(&manifolds[i]);
         }
